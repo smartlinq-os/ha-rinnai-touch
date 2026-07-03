@@ -117,7 +117,7 @@ def test_control_modules_do_not_exist_yet(integration_dir: Path) -> None:
 
 def test_scaffold_modules_import_nothing_unsafe(integration_dir: Path) -> None:
     forbidden = {"socket", "asyncio", "homeassistant", "aiohttp"}
-    for module_file in ("__init__.py", "const.py"):
+    for module_file in ("__init__.py", "const.py", "models.py"):
         imported = _top_level_imports(integration_dir / module_file)
         overlap = imported & forbidden
         assert not overlap, f"{module_file} imports forbidden modules: {overlap}"

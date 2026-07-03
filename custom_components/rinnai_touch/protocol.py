@@ -101,9 +101,10 @@ class ParsedFrame:
     """One complete, validated frame from the module's status stream.
 
     ``payload`` is the parsed JSON array: a list of single-key objects, one
-    per top-level status group. Unknown groups and fields are preserved
-    exactly as received. ``raw_frame`` is the decoded frame text including
-    the header, kept for future duplicate detection and diagnostics.
+    per top-level status group. Unknown groups and fields are preserved as
+    decoded JSON data, without dropping or interpreting them. ``raw_frame``
+    is the decoded frame text including the header, kept for future
+    duplicate detection and diagnostics.
     """
 
     sequence: int
