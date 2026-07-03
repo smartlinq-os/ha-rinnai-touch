@@ -1,0 +1,45 @@
+{
+  "description": "Fully synthetic multi-zone heat-cool status stream. Structure derived from private local passive observations; every value was replaced with synthetic data by scripts.sanitise_rinnai_capture. Safe to commit.",
+  "frame_count": 2,
+  "leading_fragment_byte_count": 11,
+  "repeated_payload": true,
+  "sequences": [
+    101,
+    102
+  ],
+  "stream_fixture": "synthetic_multizone_status_stream.bin",
+  "synthetic": true,
+  "top_level_groups": [
+    "HGOM",
+    "SYST"
+  ],
+  "zone_letters": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "U"
+  ],
+  "zones": {
+    "A": {
+      "installed_expected": true,
+      "synthetic_measured_temperature": 21.6
+    },
+    "B": {
+      "installed_expected": true,
+      "synthetic_measured_temperature": 22.4
+    },
+    "C": {
+      "installed_expected": true,
+      "synthetic_measured_temperature": 21.9
+    },
+    "D": {
+      "installed_expected": false,
+      "synthetic_measured_temperature": 22.9
+    },
+    "U": {
+      "installed_expected": false,
+      "synthetic_measured_temperature": 22.1
+    }
+  }
+}
