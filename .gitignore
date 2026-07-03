@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Home Assistant local data
+.storage/
+config/
+home-assistant_v2.db*
+*.log
+
+# Private device captures and secrets
+reference_data/raw/
+reference_data/private/
+*.pcap
+*.pcapng
+.env
+.env.*
+secrets.yaml
+
+# macOS
+.DS_Store

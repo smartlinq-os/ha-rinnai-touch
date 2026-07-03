@@ -1,0 +1,15 @@
+Rinnai Touch for Home Assistant
+
+This project is independently implemented in Python for Home Assistant.
+
+It uses protocol observations and design concepts informed by the following
+upstream project:
+
+homebridge-rinnai-touch-platform
+Copyright 2021-2026 mantorok1 and contributors
+https://github.com/mantorok1/homebridge-rinnai-touch-platform
+
+The upstream project is licensed under the Apache License, Version 2.0.
+
+This project does not include, endorse, or imply endorsement by Rinnai,
+Brivis, or the upstream project maintainers.
