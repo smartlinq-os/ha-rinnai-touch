@@ -111,6 +111,34 @@ This integration is independently implemented in Python using Home Assistant arc
 
 See `AGENT_SCOPE.md` for the development architecture, safety constraints and planned milestones.
 
+### Local development environment
+
+The project is offline-only at this milestone: it contains no networking code, and the test suite runs without network access, hardware, or a Home Assistant instance.
+
+Requirements: Python 3.12 or newer, pip 25.1 or newer (for dependency-group support).
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --group dev
+```
+
+Run the tests:
+
+```bash
+pytest
+```
+
+Run the linter and type checker:
+
+```bash
+ruff check .
+mypy custom_components tests
+```
+
+Home Assistant test fixtures (`pytest-homeassistant-custom-component`) live in the separate `ha-test` dependency group and are not needed until HA-dependent tests exist.
+
 ## Privacy and Diagnostics
 
 Do not commit raw captures, packet traces or logs containing:

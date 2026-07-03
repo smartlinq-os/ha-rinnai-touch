@@ -1,0 +1,60 @@
+# ha-rinnai-touch is a Home Assistant custom integration, not a distributable
+# Python package: Home Assistant loads custom_components/ directly and HACS
+# distributes the repository files. There is deliberately no [build-system]
+# table; this file carries project metadata and development tooling only.
+
+[project]
+name = "ha-rinnai-touch"
+version = "0.0.1"
+description = "Local-only Home Assistant custom integration for Rinnai Touch and Brivis Touch WiFi HVAC modules (offline scaffold)"
+license = "Apache-2.0"
+readme = "README.md"
+# Home Assistant 2025+ runs on Python 3.13; 3.12 is kept as the floor so the
+# scaffold does not pin more narrowly than current custom-integration practice.
+requires-python = ">=3.12"
+
+# PEP 735 dependency groups: install with `python -m pip install --group dev`
+# (pip >= 25.1). Groups do not require the project itself to be installable.
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+  "mypy",
+]
+# Home Assistant test fixtures for the config-flow and entity tests planned in
+# AGENT_SCOPE.md Phase 1. Kept in a separate group because it pins matching
+# homeassistant versions (a heavy, fast-moving dependency) and the offline
+# scaffold tests must not require Home Assistant at all. Pin it when the first
+# HA-dependent tests land.
+ha-test = [
+  "pytest-homeassistant-custom-component",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# Baseline: pycodestyle/pyflakes correctness (E, F, W), import order (I),
+# modern syntax upgrades (UP), bugbear pitfalls (B), comprehension and
+# simplification hints (C4, SIM), and Ruff-native rules (RUF).
+select = ["B", "C4", "E", "F", "I", "RUF", "SIM", "UP", "W"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["custom_components"]
+
+# Conservative baseline: catch obvious errors without imposing strictness on
+# modules that do not exist yet. Tighten as protocol/model code lands.
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "."
+explicit_package_bases = true
+check_untyped_defs = true
+warn_unused_configs = true
+ignore_missing_imports = true
