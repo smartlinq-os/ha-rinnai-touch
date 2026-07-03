@@ -121,6 +121,12 @@ def test_scaffold_modules_import_nothing_unsafe(integration_dir: Path) -> None:
         imported = _top_level_imports(integration_dir / module_file)
         overlap = imported & forbidden
         assert not overlap, f"{module_file} imports forbidden modules: {overlap}"
+    # protocol.py is a pure parser: networking and Home Assistant imports are
+    # forbidden. asyncio is not prohibited for it (it may become async-capable
+    # in a later approved milestone), though it does not import asyncio today.
+    protocol_imports = _top_level_imports(integration_dir / "protocol.py")
+    overlap = protocol_imports & {"socket", "homeassistant", "aiohttp"}
+    assert not overlap, f"protocol.py imports forbidden modules: {overlap}"
 
 
 def test_package_import_creates_no_sockets(monkeypatch) -> None:
