@@ -49,6 +49,9 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
 5. Do not enable control entities until read-only communication has been tested and approved.
 6. Do not hard-code IP addresses, room names, zones, firmware values, or assumptions from one example installation.
 7. Prefer clear diagnostics and graceful failure over aggressive retry behaviour.
+8. Close the TCP socket gracefully on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion. The module is reported to mishandle abrupt closes and rapid reconnects.
+9. The module reboot command `CS<DVPW>{wpa-key}<BOOT>\r` is known from the upstream reference but forbidden. Do not implement, expose, or recommend it. Any future consideration requires separate credential handling, an explicit safety review, and a dedicated design decision.
+10. The only write permitted in Phase 1 is the transport keepalive defined in the Transport Keepalive Policy, and only after passive probe validation confirms the module's idle disconnect behaviour.
 
 ## Core Principles
 
@@ -63,6 +66,27 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
 - Safe command serialisation
 - HACS-ready project structure
 - Testable protocol layer independent from Home Assistant entities
+
+## Home Assistant and HomeKit Boundary
+
+The integration is Home Assistant-native only. It must not include:
+
+- HomeKit pairing logic
+- HAP transport
+- HomeKit accessory definitions
+- HomeKit-specific dependencies
+- Any direct Apple Home integration code
+
+Apple Home exposure happens later through the standard Home Assistant HomeKit Bridge, configured by the user.
+
+The integration's responsibilities toward HomeKit are limited to:
+
+- Clean HA-native entity semantics
+- Stable unique IDs
+- Predictable entity names
+- Documentation about recommended HomeKit Bridge exposure
+
+See `docs/entity_model.md` for the full entity model and HomeKit Bridge guidance.
 
 ## Known Protocol Details
 
@@ -87,6 +111,13 @@ Observed default TCP port:
 ```
 
 The module uses a persistent TCP connection.
+
+Additional transport behaviour reported by the upstream reference:
+
+- The module begins sending status frames unsolicited after TCP connect. No request is required to receive status.
+- The module appears to permit only one local TCP client at a time. Homebridge, the local Rinnai TouchApp connection, a probe script, or another integration instance will conflict with an active connection. Setup and troubleshooting documentation must warn users about this.
+- The module is reported to drop connections after roughly five minutes without receiving any bytes. This must be confirmed by passive probe observation before the integration relies on it.
+- The module is reported to enter a refused-connection state if a socket is closed abruptly or reopened too quickly. Graceful socket closure on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion is mandatory.
 
 Incoming messages have the observed shape:
 
@@ -114,6 +145,37 @@ The parser must correctly handle:
 - Unexpected bytes
 - Disconnects and reconnects
 
+### Sequence Numbers
+
+- Outgoing sequence numbers are derived from the latest valid received sequence.
+- Outgoing sequence increments modulo 255.
+- Sequence zero is skipped for outgoing frames.
+- Received sequence zero is valid and must be accepted.
+- Sequence values are zero-padded to six digits.
+
+### Status Merge and Retention Semantics
+
+- A status payload is a JSON array of single-key objects. Each received top-level group replaces the previously stored copy of that group. Nested fields are not deep-merged.
+- Mode-group data is retained as last-known state. Absence of a mode group in a new frame does not mean the feature is unavailable or inactive.
+- Entities and availability must use timestamps, the active operating mode, and observed capabilities, not group absence alone.
+- Observed zones and mode capabilities are accumulated conservatively across valid status frames. A zone is not removed merely because its mode group is absent from a later frame. Zone removal requires explicit validated evidence or user-driven reconfiguration.
+
+### Transport Keepalive Policy
+
+The upstream reference reports the module disconnects idle TCP clients after about five minutes. To hold a persistent read-only session, a narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
+
+- The keepalive frame is exactly `N` followed by a six-digit sequence number, with no JSON payload.
+- The sequence is derived from the latest valid received frame.
+- Keepalives are sent no more frequently than every 60 seconds.
+- No keepalive is sent until at least one valid status frame has been received on the current connection.
+- The keepalive must never include a JSON payload, and must never be a reboot, date/time, mode, power, fan, zone, pump, schedule, or any other state-changing command.
+- Keepalives are logged at debug level only.
+- This is a transport keepalive, not a generic read-only operation. Describe it as such in code and documentation.
+
+The keepalive becomes Phase 1 integration behaviour only after passive probe validation confirms the module's idle disconnect behaviour.
+
+The read-only probe defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
+
 ### Commands
 
 Observed command shape:
@@ -125,6 +187,14 @@ N000123{"HGOM":{"ZAO":{"SP":"23"}}}
 The command sequence should be based on the latest valid received sequence number.
 
 Command success must be determined by observing a later valid status update that confirms the requested values.
+
+The upstream module reboot command is known but forbidden:
+
+```text
+CS<DVPW>{wpa-key}<BOOT>\r
+```
+
+Do not implement, expose, or recommend it. Any future consideration would require separate credential handling, an explicit safety review, and a dedicated design decision.
 
 ## Important Status Groups
 
@@ -174,6 +244,8 @@ ZAO, ZBO, ZCO, ZDO    Zone output/settings groups
 ZAS, ZBS, ZCS, ZDS    Zone status/sensed-value groups
 ```
 
+Zone `U` (Common) is a first-class protocol zone alongside `A`–`D`. The upstream reference reads sensed values for it (for example `ZUS.MT`) and a zone-installed flag (`ZUIS`) under the active mode's `CFG` subgroup. Zone option groups (`Z?O`) were only observed upstream for zones `A`–`D`; whether a `ZUO` group exists is unvalidated.
+
 Observed or inferred fields include:
 
 ```text
@@ -186,6 +258,16 @@ AO     Schedule override
 ```
 
 Fields not yet validated across multiple systems must be treated as diagnostic-only until confirmed.
+
+### Capability Discovery Boundary
+
+Zone-installed flags (`Z?IS`) live under the `CFG` subgroup of the currently observed active mode group. Phase 1 capability discovery must be passive and cumulative across received frames. It must never imitate the upstream Homebridge plugin's active discovery approach of changing power state or cycling HVAC modes to enumerate capabilities. That approach is forbidden in all phases without explicit approval.
+
+### Temperature and Value Caveats
+
+- `MT` is reported in tenths of a degree. `MT=999` means no valid temperature reading.
+- Some controllers never report temperatures at all. Temperature entities must be conditional and must never substitute zero for missing values.
+- Evaporative setpoint values are diagnostic-only until validated with real device data, because they may represent a comfort level (observed upstream range 19–34) rather than a literal temperature.
 
 ## Required Architecture
 
@@ -204,8 +286,8 @@ ha-rinnai-touch/
 │       ├── diagnostics.py
 │       ├── sensor.py
 │       ├── binary_sensor.py
-│       ├── climate.py
-│       ├── switch.py
+│       ├── climate.py     (Phase 2 only — must not exist in Phase 1)
+│       ├── switch.py      (Phase 2 only — must not exist in Phase 1)
 │       ├── manifest.json
 │       ├── strings.json
 │       └── translations/
@@ -220,6 +302,8 @@ ha-rinnai-touch/
 ├── scripts/
 │   └── rinnai_probe.py
 ├── docs/
+│   ├── entity_model.md
+│   └── protocol_assumptions.md
 ├── reference_data/
 ├── README.md
 ├── LICENSE
@@ -244,6 +328,7 @@ Connect timeout: 10 seconds
 Command acknowledgement timeout: 15 seconds
 Stale status threshold: 180 seconds
 Reconnect backoff: 2s, 5s, 10s, 30s, then 60s maximum
+Keepalive spacing: 60 seconds minimum (see Transport Keepalive Policy)
 ```
 
 Availability must be based on recent valid status data, not merely the existence of a socket object.
@@ -268,8 +353,13 @@ Required features:
 - Zone availability/install indicators
 - Diagnostics download with sensitive data redacted
 - Unit tests using anonymised protocol fixtures
+- Transport keepalive per the Transport Keepalive Policy, enabled only after passive probe validation
+- Conservative, cumulative capability and zone discovery
+- Config-flow and documentation warnings about the single-TCP-client constraint
 
 Do not expose command-capable climate or switch entities during this phase.
+
+`climate.py` and `switch.py` do not exist in Phase 1 and must remain absent until explicit Phase 2 approval.
 
 ## Phase 2: Controlled Commands
 
@@ -297,16 +387,83 @@ Every command must:
 
 ## Entity Design
 
-Avoid mirroring Homebridge’s accessory model.
+Avoid mirroring Homebridge's accessory model. The full entity inventory, behaviour specification, HomeKit Bridge guidance, and naming strategy live in `docs/entity_model.md`. The binding principles are summarised here.
 
-Preferred entity design:
+### Device Model
 
-- One main climate entity for the overall HVAC system.
-- Optional per-zone climate entities only after multi-setpoint behaviour is confirmed.
-- Zone-enable switches where capability data supports them.
-- Diagnostic sensors for connection state, stale data, mode, controller state and raw fault values.
-- Fan and pump entities only where hardware capability is confirmed.
-- Schedules, manual mode and advance-period functions should be future services or advanced entities, not first-release clutter.
+- One Home Assistant device per physical Rinnai/Brivis WiFi module.
+- Child zone devices may be created only where installed zones are confirmed.
+- Zone devices use stable protocol letters internally: `u`, `a`, `b`, `c`, `d`.
+- Controller-provided zone names are display names only. User renames must not alter entity unique IDs.
+- Do not automatically assign Areas. Do not create dashboards automatically.
+
+### Main Climate Entity (Phase 2)
+
+- One main climate entity per module, representing the global physical HVAC mode.
+- Global modes may include Off, Heat, Cool, and Fan Only where supported and validated. Evaporative-only systems may map cooling to the global evaporative mode after validation.
+- Do not expose HVAC Auto or Heat-Cool range mode unless real hardware provides a validated native automatic changeover capability. Do not reproduce the upstream plugin's simulated Auto behaviour.
+- On multi-setpoint systems, the main climate entity may have no global target temperature because targets belong to zones. On single-setpoint systems, a global target temperature may be exposed after validation.
+- Current temperature must be conditional and never fabricated.
+
+### Global Mode Semantics for Multi-Zone Systems
+
+The hardware has one physical global HVAC mode. The entity model represents that constraint accurately, using "last explicit mode request wins":
+
+- Setting an installed zone climate to Heat, Cool, or Fan Only switches the whole system to that mode, enables that zone, and then applies that zone's target temperature where applicable.
+- Setting a zone to Off disables that zone only. It must not turn off the entire system or other enabled zones.
+- Setting the main climate entity to Off turns off the entire HVAC system.
+- A zone target-temperature change alone must not infer or alter the global Heat/Cool mode.
+- Once a global mode change is confirmed, every enabled zone entity must report the resulting global HVAC mode. A zone must never silently claim it can heat while the plant is globally cooling, or vice versa.
+
+### Zone Entities
+
+- Zone climate entities are created only for installed zones on confirmed multi-setpoint systems. Zone target temperature and current temperature are local; zone mode reflects the global physical mode.
+- Single-setpoint systems must not create fake zone climate entities.
+- Multi-setpoint systems normally use the zone climate Off state to disable a zone. Do not add duplicate zone-enable switches where they would conflict with a zone climate entity.
+- Single-setpoint or evaporative systems may receive dedicated zone-enable switches only where validated hardware fields support them.
+
+### Fan and Evaporative Pump
+
+- The circulation fan should become a separate Home Assistant fan entity where validated, not merely a climate fan mode.
+- Evaporative pump control may become a switch only after real-device validation. Pump controls are operationally sensitive and must not be part of the recommended Apple Home exposure set.
+
+### Phase 1 Entity Set
+
+Phase 1 is read-only and contains only validated observational entities: connectivity, fault active, zone temperature sensors where available, operating mode, controller state, last-valid-status timestamp, limited fault detail, zone-installed diagnostics, and client diagnostics such as reconnect count and last disconnect reason.
+
+Raw payloads must be available only in redacted diagnostics downloads, not as normal entity state or attributes.
+
+Enabled by default where supported: connectivity, fault active, zone temperature sensors, operating mode, controller state, last-valid-status timestamp.
+
+Disabled by default: fault-code detail, zone-installed indicators, reconnect counters, frame counters, last disconnect reason, unvalidated field sensors, future schedule/manual/auto diagnostic entities, evaporative comfort-level diagnostics.
+
+### Naming and Unique IDs
+
+- Root identity is the config entry ID.
+- Entity unique IDs use `{entry_id}_{stable_protocol_key}` with fixed keys such as `climate_main`, `zone_a_climate`, `zone_a_temperature`, `zone_a_enabled`, `fault_active`, `fan`.
+- Never use IP address, hostname, controller zone name, room name, capability state, or current mode in a unique ID.
+- Capability changes may add or disable entities but must not re-key existing entities.
+- Zone letters are stable internal identities. Zone names are display names only.
+- Avoid unique-ID migrations unless a versioned migration is explicitly designed and tested.
+
+### HomeKit Bridge Exposure Summary
+
+- Phase 1: do not recommend exposing this integration to HomeKit Bridge at all.
+- Phase 2: recommended exposure and the never-expose list are specified in `docs/entity_model.md`. Diagnostics, protocol counters, fault data, pump controls, and anything based on unvalidated fields are never recommended for Apple Home.
+
+## Probe Tool Specification
+
+`scripts/rinnai_probe.py` is a standalone, read-only diagnostic tool. It:
+
+- is user-run only; the integration and agents never invoke it
+- defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option
+- writes raw captures only to `reference_data/raw/`, which is ignored by Git
+- warns about the single-client constraint before connecting
+- warns users to stop Homebridge and competing local clients first
+- prints a sanitisation/redaction checklist after capture
+- never publishes raw captures into Git
+
+The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected, to confirm the module's idle-disconnect behaviour.
 
 ## Testing Requirements
 
