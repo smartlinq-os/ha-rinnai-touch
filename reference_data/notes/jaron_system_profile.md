@@ -9,7 +9,7 @@ Generic, non-identifying facts about the primary development/test installation. 
 | Field | Value | Source |
 |---|---|---|
 | Brand (Rinnai / Brivis) | Pending | — |
-| WiFi module model | Pending (expected N-BW2 family) | — |
+| WiFi module model | Pending | Passive probe / controller documentation |
 | Heater present (`SYST.AVM.HG`) | Pending | — |
 | Add-on cooling present (`SYST.AVM.CG`) | Pending | — |
 | Evaporative cooling present (`SYST.AVM.EC`) | Pending | — |

@@ -12,7 +12,7 @@ Protocol facts below are derived from reading the upstream Homebridge project:
 
 No live-device captures exist yet. Every fact below, however well supported by upstream source, remains subject to confirmation by passive probe observation.
 
-## Confirmed Upstream Protocol Facts
+## Upstream-Sourced Protocol Facts
 
 ### UDP discovery
 
@@ -26,7 +26,7 @@ No live-device captures exist yet. Every fact below, however well supported by u
 
 - Default TCP port `27847` when an address is configured manually.
 - The module begins sending status frames unsolicited after TCP connect; no request is needed.
-- The module appears to permit only one local TCP client at a time. A held connection locks out Homebridge, probe scripts, other integrations, and the TouchApp's local connection (the TouchApp falls back to the Rinnai cloud).
+- The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Upstream documentation reports that the TouchApp may still operate via the Rinnai cloud while a local connection is held. Behaviour may vary by module firmware and remains subject to local validation.
 - Upstream reports the module drops connections after roughly five minutes without receiving any bytes.
 - Upstream reports the module can enter a refused-connection state if a socket is closed abruptly or reopened too quickly. Graceful closure is mandatory on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion.
 - Upstream reports the module normally reboots itself daily, that a permanently held TCP connection prevents this, and that the module may become unstable after being connected for long periods.
@@ -105,6 +105,15 @@ Zone and value caveats:
 - The upstream module reboot command `CS<DVPW>{wpa-key}<BOOT>\r` is known but **forbidden**: do not implement, expose, or recommend it. Any future consideration requires separate credential handling, an explicit safety review, and a dedicated design decision.
 - Upstream's capability discovery actively powers the system on and cycles operating modes (`src/platform.ts`, `findDevices`). That approach is forbidden here in all phases: Phase 1 capability discovery is passive and cumulative only.
 
+## Phase 1 Operating Modes
+
+Phase 1 has two operating modes:
+
+- Passive observation mode: no bytes are transmitted.
+- Persistent monitored mode: only after passive validation, the narrowly authorised transport keepalive may be transmitted to maintain a stable local session.
+
+No HVAC state-changing command is permitted in either mode. The keepalive is a tightly scoped transport write, not a generic read-only operation.
+
 ## Transport Keepalive Policy
 
 The upstream reference reports the module disconnects idle TCP clients after about five minutes. A narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
@@ -118,6 +127,12 @@ The upstream reference reports the module disconnects idle TCP clients after abo
 - It is described as a transport keepalive, not as a generic read-only operation.
 
 The keepalive becomes Phase 1 integration behaviour only after passive probe validation confirms the module's idle disconnect behaviour. The probe defaults to passive mode and sends no bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
+
+## Config Flow Connection Policy
+
+Any live connection attempt during configuration must be initiated by an explicit user action in the config flow. Saving a configuration entry must not silently test, scan, or reconnect to the module beyond the connection policy approved for the active integration entry.
+
+Home Assistant startup, integration reload, passive discovery, and persistence of configuration must not silently trigger an extra validation connection. A user submitting a setup form is an explicit action; importing configuration or starting Home Assistant is not, and the integration must not unexpectedly connect merely because configuration was imported or Home Assistant started.
 
 ## Assumptions Requiring Real-World Validation
 

@@ -115,7 +115,7 @@ The module uses a persistent TCP connection.
 Additional transport behaviour reported by the upstream reference:
 
 - The module begins sending status frames unsolicited after TCP connect. No request is required to receive status.
-- The module appears to permit only one local TCP client at a time. Homebridge, the local Rinnai TouchApp connection, a probe script, or another integration instance will conflict with an active connection. Setup and troubleshooting documentation must warn users about this.
+- The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Setup and troubleshooting documentation must warn users about this prominently.
 - The module is reported to drop connections after roughly five minutes without receiving any bytes. This must be confirmed by passive probe observation before the integration relies on it.
 - The module is reported to enter a refused-connection state if a socket is closed abruptly or reopened too quickly. Graceful socket closure on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion is mandatory.
 
@@ -162,7 +162,7 @@ The parser must correctly handle:
 
 ### Transport Keepalive Policy
 
-The upstream reference reports the module disconnects idle TCP clients after about five minutes. To hold a persistent read-only session, a narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
+The upstream reference reports the module disconnects idle TCP clients after about five minutes. To hold a persistent monitored session, a narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
 
 - The keepalive frame is exactly `N` followed by a six-digit sequence number, with no JSON payload.
 - The sequence is derived from the latest valid received frame.
@@ -174,7 +174,7 @@ The upstream reference reports the module disconnects idle TCP clients after abo
 
 The keepalive becomes Phase 1 integration behaviour only after passive probe validation confirms the module's idle disconnect behaviour.
 
-The read-only probe defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
+The probe defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
 
 ### Commands
 
@@ -333,9 +333,22 @@ Keepalive spacing: 60 seconds minimum (see Transport Keepalive Policy)
 
 Availability must be based on recent valid status data, not merely the existence of a socket object.
 
+### Config Flow Connection Policy
+
+Any live connection attempt during configuration must be initiated by an explicit user action in the config flow. Saving a configuration entry must not silently test, scan, or reconnect to the module beyond the connection policy approved for the active integration entry.
+
+Home Assistant startup, integration reload, passive discovery, and persistence of configuration must not silently trigger an extra validation connection. A user submitting a setup form is an explicit action; importing configuration or starting Home Assistant is not, and the integration must not unexpectedly connect merely because configuration was imported or Home Assistant started.
+
 ## Phase 1: Read-Only Integration
 
 Build this first.
+
+Phase 1 has two operating modes:
+
+- Passive observation mode: no bytes are transmitted.
+- Persistent monitored mode: only after passive validation, the narrowly authorised transport keepalive may be transmitted to maintain a stable local session.
+
+No HVAC state-changing command is permitted in either mode. The keepalive is a tightly scoped transport write, not a generic read-only operation.
 
 Required features:
 
@@ -355,7 +368,7 @@ Required features:
 - Unit tests using anonymised protocol fixtures
 - Transport keepalive per the Transport Keepalive Policy, enabled only after passive probe validation
 - Conservative, cumulative capability and zone discovery
-- Config-flow and documentation warnings about the single-TCP-client constraint
+- Config-flow and documentation warnings about the upstream-reported single-local-client limitation
 
 Do not expose command-capable climate or switch entities during this phase.
 
@@ -453,12 +466,12 @@ Disabled by default: fault-code detail, zone-installed indicators, reconnect cou
 
 ## Probe Tool Specification
 
-`scripts/rinnai_probe.py` is a standalone, read-only diagnostic tool. It:
+`scripts/rinnai_probe.py` is a standalone diagnostic capture tool. It:
 
 - is user-run only; the integration and agents never invoke it
 - defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option
 - writes raw captures only to `reference_data/raw/`, which is ignored by Git
-- warns about the single-client constraint before connecting
+- warns about the upstream-reported single-local-client limitation before connecting
 - warns users to stop Homebridge and competing local clients first
 - prints a sanitisation/redaction checklist after capture
 - never publishes raw captures into Git

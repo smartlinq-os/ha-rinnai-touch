@@ -94,7 +94,7 @@ Do not run experimental command tools against an HVAC module unless you understa
 
 ### Module connection constraints
 
-- The WiFi module appears to allow only one local TCP client at a time. Homebridge, another integration instance, a probe script, or the Rinnai TouchApp's local connection will conflict with an active connection. The TouchApp can still operate via the Rinnai cloud while the local connection is held.
+- The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Upstream documentation reports that the TouchApp may still operate via the Rinnai cloud while a local connection is held.
 - Upstream observations report that the module drops idle TCP connections after roughly five minutes, and that it may refuse connections for a period if a socket is closed abruptly or reopened too quickly. These behaviours are pending local validation.
 
 ## Development
