@@ -92,6 +92,21 @@ nc -vz -w 3 <MODULE_IP> 27847
 
 Do not run experimental command tools against an HVAC module unless you understand the impact and have stopped any competing local integration, such as Homebridge.
 
+### Passive protocol probe
+
+`scripts/rinnai_probe.py` is a user-run, strictly passive capture tool for gathering private local protocol evidence (frame cadence, idle-disconnect timing, framing, sequences, field shape). It transmits no bytes to the module.
+
+Before a first capture:
+
+1. Stop Homebridge and any other local integration or client that talks to the module; the module may permit only one local TCP connection, and the local Rinnai/Brivis app may conflict while the capture runs.
+2. Run the probe with the explicit acknowledgement flag. The default capture length is 360 seconds (six minutes) — keep at least that for the first real capture so idle-disconnect behaviour can be observed:
+
+```bash
+python scripts/rinnai_probe.py --host <MODULE_IP> --confirm-passive-capture
+```
+
+Raw output is written privately under `reference_data/raw/` (git-ignored). Raw captures can contain household data and must never be committed; each capture includes a notes file with the redaction checklist to follow before any sanitised fixture is created. Any future decision about a transport keepalive depends on the evidence these passive captures provide.
+
 ### Module connection constraints
 
 - The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Upstream documentation reports that the TouchApp may still operate via the Rinnai cloud while a local connection is held.
