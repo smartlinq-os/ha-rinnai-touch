@@ -332,6 +332,61 @@ def test_entity_translations_cover_the_approved_inventory(
     }
 
 
+def test_client_logging_is_address_and_error_sanitised(
+    integration_dir: Path,
+) -> None:
+    """client.py logger calls may never carry addresses or raw error text.
+
+    Rejected inside any ``_LOGGER.*`` call argument:
+    ``self._host`` / ``self._port`` (any ``_host``/``_port`` attribute),
+    bare ``host``/``port`` names, ``event.error`` (ConnectionEvent text may
+    embed OS detail and is stored, never logged), and ``str()``/``repr()``
+    of a caught exception (``error``/``err``/``exc``) — OS exception
+    messages can embed the remote address. Failures must be logged only as
+    fixed classification labels, exception class names, and integer errnos.
+    """
+    tree = ast.parse((integration_dir / "client.py").read_text("utf-8"))
+    banned_attributes = {"_host", "_port"}
+    banned_names = {"host", "port"}
+    logger_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_LOGGER"
+    ]
+    assert logger_calls, "client.py is expected to log forensics"
+    for call in logger_calls:
+        arguments = [*call.args, *(keyword.value for keyword in call.keywords)]
+        for argument in arguments:
+            for sub in ast.walk(argument):
+                if isinstance(sub, ast.Attribute):
+                    assert sub.attr not in banned_attributes, (
+                        f"logger argument references {sub.attr}"
+                    )
+                    event_error = (
+                        sub.attr == "error"
+                        and isinstance(sub.value, ast.Name)
+                        and sub.value.id == "event"
+                    )
+                    assert not event_error, "event.error must never be logged"
+                if isinstance(sub, ast.Name):
+                    assert sub.id not in banned_names, (
+                        f"logger argument references name {sub.id!r}"
+                    )
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id in {"str", "repr"}
+                ):
+                    for inner in sub.args:
+                        assert not (
+                            isinstance(inner, ast.Name)
+                            and inner.id in {"error", "err", "exc"}
+                        ), "str()/repr() of an exception must never be logged"
+
+
 def test_coordinator_defines_no_command_or_keepalive_api(
     integration_dir: Path,
 ) -> None:

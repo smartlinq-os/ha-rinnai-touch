@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import errno
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -21,6 +23,7 @@ from custom_components.rinnai_touch.client import (
     ConnectionEvent,
     ConnectionState,
     RinnaiTcpClient,
+    _SessionForensics,
 )
 from custom_components.rinnai_touch.models import StatusSnapshot
 
@@ -756,3 +759,464 @@ async def test_restart_after_stop_keeps_cumulative_model(
         assert snapshots.snapshots[1].capabilities.heater_observed is True
     finally:
         await client.stop()
+
+
+# --- transport forensics: sanitised logging only (Commit 11) ---------------------
+
+CLIENT_LOGGER = "custom_components.rinnai_touch.client"
+
+# Words that would attribute a cause to the module; the approved warning
+# wording is strictly factual and must never contain them.
+_ATTRIBUTION_WORDS = ("module", "busy", "slot", "reject", "readiness", "refus")
+
+BANNER = b"*HELLO*"
+
+
+def client_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == CLIENT_LOGGER
+    ]
+
+
+def client_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == CLIENT_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+def forensics_of(client: RinnaiTcpClient) -> _SessionForensics | None:
+    """The client's private per-session record (test inspection is approved)."""
+    return client._last_session_forensics
+
+
+async def wait_for_session_count(client: RinnaiTcpClient, count: int) -> None:
+    def _reached() -> bool:
+        summary = forensics_of(client)
+        return summary is not None and summary.session_number >= count
+
+    await wait_until(_reached)
+
+
+async def test_forensics_success_session_with_banner(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_client(server.port, snapshots=snapshots)
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(BANNER)
+        frame = encode_frame(1, [SYST_FULL])
+        await server.send(frame)
+        await snapshots.wait_for(1)
+        await server.drop_current()
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "established-then-closed"
+        assert summary.reason == "remote-eof"
+        assert summary.error_class is None
+        assert summary.error_errno is None
+        assert summary.banner_seen is True
+        assert summary.frames_received == 1
+        assert summary.non_empty_frames == 1
+        assert summary.bytes_received == len(BANNER) + len(frame)
+        assert summary.chunks_received >= 1
+        assert summary.connect_ms is not None
+        assert summary.first_bytes_ms is not None
+        assert summary.first_frame_ms is not None
+        assert summary.parser_discarded_bytes == len(BANNER)  # banner is
+        # ordinary pre-frame garbage to the parser: outcomes are unchanged.
+        messages = client_messages(caplog)
+        assert any("TCP established in" in message for message in messages)
+        assert any("first bytes received" in message for message in messages)
+        assert any("HELLO banner observed" in message for message in messages)
+        assert any(
+            "first non-empty status frame" in message for message in messages
+        )
+        assert any(
+            "session end (phase=established-then-closed, reason=remote-eof"
+            in message
+            for message in messages
+        )
+        info_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == CLIENT_LOGGER and record.levelno == logging.INFO
+        ]
+        assert any(
+            "first valid frame received" in message for message in info_messages
+        )
+        assert client_warnings(caplog) == []  # healthy session: no warning
+    finally:
+        await client.stop()
+
+
+async def test_banner_detected_across_split_chunks(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_client(server.port, snapshots=snapshots)
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(BANNER[:3])
+        await asyncio.sleep(0.02)  # encourage separate TCP reads
+        await server.send(BANNER[3:])
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await server.drop_current()
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.banner_seen is True
+        banner_logs = [
+            message
+            for message in client_messages(caplog)
+            if "HELLO banner observed" in message
+        ]
+        assert len(banner_logs) == 1  # detected exactly once, split-safe
+    finally:
+        await client.stop()
+
+
+async def test_session_without_banner_reports_banner_no(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_client(server.port, snapshots=snapshots)
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await server.drop_current()
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.banner_seen is False
+        messages = client_messages(caplog)
+        assert not any("HELLO banner observed" in message for message in messages)
+        first_bytes = [m for m in messages if "first bytes received" in m]
+        assert len(first_bytes) == 1
+        assert "banner=no" in first_bytes[0]
+    finally:
+        await client.stop()
+
+
+async def test_immediate_eof_forensics_and_single_warning(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    events = EventCollector()
+    client = new_client(server.port, events=events)
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.drop_current()  # zero bytes, immediate EOF
+        await server.wait_for_connections(2)
+        await server.drop_current()  # second identical failure
+        await wait_for_session_count(client, 2)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "established-then-closed"
+        assert summary.reason == "remote-eof"
+        assert summary.bytes_received == 0
+        assert summary.frames_received == 0
+        assert summary.banner_seen is False
+        assert client._sessions_without_frame == 2
+        # Exactly one warning for the whole outage, with the approved,
+        # strictly factual wording and no cause attribution.
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 1
+        assert "transport session ended without a valid frame" in warnings[0]
+        assert "reason=remote-eof" in warnings[0]
+        lowered = warnings[0].lower()
+        assert not any(word in lowered for word in _ATTRIBUTION_WORDS)
+        # The event payload is byte-identical to the pre-forensics contract.
+        failed = [
+            event
+            for event in events.events
+            if event.state is ConnectionState.CONNECTION_FAILED
+        ]
+        assert failed[0].error == "connection closed by remote end"
+    finally:
+        await client.stop()
+
+
+async def test_recovery_info_then_rewarn_after_clear(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_client(server.port, snapshots=snapshots)
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.drop_current()  # outage begins: warning 1
+        await server.wait_for_connections(2)
+        await server.send(encode_frame(1, [SYST_FULL]))  # recovery
+        await snapshots.wait_for(1)
+        assert client._sessions_without_frame == 0  # cleared on first frame
+        assert client._warned_classification is None
+        info_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == CLIENT_LOGGER and record.levelno == logging.INFO
+        ]
+        assert any(
+            "valid status restored after 1 session(s)" in message
+            for message in info_messages
+        )
+        await server.drop_current()  # healthy session ends
+        await server.wait_for_connections(3)
+        await server.drop_current()  # new outage: must warn again
+        await wait_until(lambda: len(client_warnings(caplog)) >= 2)
+        assert len(client_warnings(caplog)) == 2
+    finally:
+        await client.stop()
+
+
+async def test_refused_connection_classification(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    throwaway = FakeRinnaiServer()
+    await throwaway.start()
+    refused_port = throwaway.port
+    await throwaway.stop()
+
+    sleeper = FakeSleep(block_after=2)
+    client = new_client(refused_port, sleeper=sleeper)
+    try:
+        await client.start()
+        await sleeper.wait_for_delays(2)  # two attempts completed
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "connect-failed"
+        assert summary.reason == "refused"
+        assert summary.error_class == "ConnectionRefusedError"
+        assert summary.error_errno == errno.ECONNREFUSED
+        assert summary.connect_ms is None
+        assert summary.bytes_received == 0
+        # One warning only: the classification never changed.
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 1
+        assert "reason=refused" in warnings[0]
+        messages = client_messages(caplog)
+        assert any(
+            "session end (phase=connect-failed, reason=refused" in message
+            for message in messages
+        )
+    finally:
+        await client.stop()
+
+
+async def test_classification_change_triggers_new_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    calls = 0
+
+    async def fake_open_connection(host: str, port: int) -> tuple[object, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic refusal")
+        raise ConnectionResetError(errno.ECONNRESET, "synthetic reset")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    sleeper = FakeSleep(block_after=2)
+    client = new_client(1, sleeper=sleeper)  # port never reached: patched
+    try:
+        await client.start()
+        await sleeper.wait_for_delays(2)
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 2  # classification changed mid-outage
+        assert "reason=refused" in warnings[0]
+        assert "reason=reset" in warnings[1]
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.reason == "reset"
+        assert summary.error_class == "ConnectionResetError"
+    finally:
+        await client.stop()
+
+
+async def test_timeout_classification(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+
+    async def never_connects(host: str, port: int) -> tuple[object, object]:
+        await asyncio.Event().wait()  # cancelled by the connect timeout
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(asyncio, "open_connection", never_connects)
+    sleeper = FakeSleep(block_after=1)
+    client = RinnaiTcpClient(
+        "127.0.0.1",
+        1,
+        connect_timeout=0.05,
+        sleep=sleeper,
+    )
+    try:
+        await client.start()
+        await sleeper.wait_for_delays(1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "connect-failed"
+        assert summary.reason == "timeout"
+        assert summary.error_class == "TimeoutError"
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 1
+        assert "reason=timeout" in warnings[0]
+    finally:
+        await client.stop()
+
+
+class _NeverWriter:
+    """Writer stub for the socket-free reset test; close paths only."""
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+class _ResetReader:
+    """Reader stub whose read fails like a forcibly closed connection."""
+
+    async def read(self, n: int) -> bytes:
+        raise ConnectionResetError(errno.ECONNRESET, "synthetic reset")
+
+
+async def test_read_reset_classification(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+
+    async def stub_connection(host: str, port: int) -> tuple[object, object]:
+        return _ResetReader(), _NeverWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", stub_connection)
+    events = EventCollector()
+    sleeper = FakeSleep(block_after=1)
+    client = new_client(1, events=events, sleeper=sleeper)
+    try:
+        await client.start()
+        await sleeper.wait_for_delays(1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "established-then-closed"
+        assert summary.reason == "reset"
+        assert summary.error_class == "ConnectionResetError"
+        assert summary.error_errno == errno.ECONNRESET
+        assert summary.frames_received == 0
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 1
+        assert "reason=reset" in warnings[0]
+        # The event payload keeps the pre-forensics wording (never logged).
+        failed = [
+            event
+            for event in events.events
+            if event.state is ConnectionState.CONNECTION_FAILED
+        ]
+        assert failed and failed[0].error is not None
+        assert failed[0].error.startswith("read failed: ")
+    finally:
+        await client.stop()
+
+
+async def test_no_address_material_in_client_logs(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_client(server.port, snapshots=snapshots)
+    await client.start()
+    await server.wait_for_connections(1)
+    await server.send(BANNER + encode_frame(1, [SYST_FULL]))
+    await snapshots.wait_for(1)
+    await server.drop_current()  # healthy close
+    await server.wait_for_connections(2)
+    await server.drop_current()  # frameless close (warning path)
+    await wait_for_session_count(client, 2)
+    await client.stop()
+
+    # A refused attempt exercises the connect-failure logging too.
+    throwaway = FakeRinnaiServer()
+    await throwaway.start()
+    refused_port = throwaway.port
+    await throwaway.stop()
+    sleeper = FakeSleep(block_after=1)
+    refused_client = new_client(refused_port, sleeper=sleeper)
+    await refused_client.start()
+    await sleeper.wait_for_delays(1)
+    await refused_client.stop()
+
+    assert client_messages(caplog)  # the sweep below inspects real output
+    for message in client_messages(caplog):
+        assert "127.0.0.1" not in message
+        assert str(server.port) not in message
+        assert str(refused_port) not in message
+        assert "connect failed:" not in message  # raw event text, never logged
+        assert "read failed:" not in message
+
+
+async def test_session_identity_and_lifecycle_logs(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    first = new_client(server.port)
+    second = new_client(server.port)
+    assert second._client_number == first._client_number + 1
+    try:
+        await first.start()
+        await first.start()  # idempotent: logged, no second supervisor
+        await server.wait_for_connections(1)
+        await server.drop_current()
+        await server.wait_for_connections(2)  # session 2 established
+        await wait_until(lambda: first.connected)
+    finally:
+        await first.stop()
+    # Session 2's summary is written when stop() ends it: numbering counts
+    # every attempt of this client, across reconnects.
+    summary = forensics_of(first)
+    assert summary is not None
+    assert summary.client_number == first._client_number
+    assert summary.session_number == 2
+    assert summary.phase == "stopped"
+    messages = client_messages(caplog)
+    assert any("supervisor starting" in message for message in messages)
+    assert any(
+        "start ignored; supervisor already active" in message
+        for message in messages
+    )
+    assert any("stop requested" in message for message in messages)
+    assert any("supervisor exited" in message for message in messages)
+
+
+async def test_stop_mid_session_summary_without_warning(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    client = new_client(server.port)
+    await client.start()
+    await server.wait_for_connections(1)  # server stays silent
+    await client.stop()
+    summary = forensics_of(client)
+    assert summary is not None
+    assert summary.phase == "stopped"
+    assert summary.reason == "stopped"
+    assert summary.frames_received == 0
+    assert client._sessions_without_frame == 0  # stop is not an outage
+    assert client_warnings(caplog) == []
