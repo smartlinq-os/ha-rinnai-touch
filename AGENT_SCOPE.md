@@ -74,9 +74,14 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
   TCP client is a supported legacy transport adapter beneath that boundary,
   not the SmartLinq HVAC product core.
 - `docs/networker_evidence.md` — the Rinnai / Brivis Networker bus evidence
-  register (Proven / Inference / Hypothesis / Unknown). Networker bus facts
+  register (five evidence labels plus source classes). Networker bus facts
   must not enter integration code, entities, or configuration without
   separately approved scope.
+- `docs/research/community_brivis_networker_reverse_engineering_review.md` —
+  read-only review of community Brivis Networker reverse-engineering
+  evidence, scoped to studied legacy controller-family installations.
+  Touch-generation and N-BW2 bus behaviour remain Unknown; the review
+  grants no new operational permissions of any kind.
 
 ## Home Assistant and HomeKit Boundary
 

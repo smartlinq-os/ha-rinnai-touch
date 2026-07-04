@@ -76,6 +76,15 @@ participation. Hardware work is a separately approved, passive-first
 research programme with its own gates; its evidence register is
 `docs/networker_evidence.md`.
 
+Community reverse-engineering evidence reviewed on 4 July 2026 (see
+`docs/research/community_brivis_networker_reverse_engineering_review.md`)
+means that research no longer starts from a blank physical-layer hypothesis
+for certain studied legacy Brivis controller-family systems. Both sides of
+that finding are binding: the same review establishes that Touch-generation
+systems, N-BW2-specific bus behaviour, safe parallel third-party
+attachment, active participation, and commercial suitability remain
+Unknown. The decision, gates, and rules in this ADR are unchanged.
+
 ## Rules for future work
 
 1. Entities depend on typed coordinator state, freshness, and capability
