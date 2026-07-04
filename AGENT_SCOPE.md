@@ -73,6 +73,10 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
   boundary and the transport-neutral SmartLinq semantic contract. The N-BW2
   TCP client is a supported legacy transport adapter beneath that boundary,
   not the SmartLinq HVAC product core.
+- `docs/adr/0002-nbw2-passive-stale-session-recycle.md` — the passive
+  stale-session recycle design for the N-BW2 transport adapter:
+  adapter-specific recovery that transmits nothing, with parameter values
+  deferred to a separately approved implementation review.
 - `docs/networker_evidence.md` — the Rinnai / Brivis Networker bus evidence
   register (five evidence labels plus source classes). Networker bus facts
   must not enter integration code, entities, or configuration without
@@ -132,7 +136,7 @@ Additional transport behaviour reported by the upstream reference:
 
 - The module begins sending status frames unsolicited after TCP connect. No request is required to receive status.
 - The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Setup and troubleshooting documentation must warn users about this prominently.
-- The module is reported to drop connections after roughly five minutes without receiving any bytes. This must be confirmed by passive probe observation before the integration relies on it.
+- The module is reported to drop connections after roughly five minutes without receiving any bytes. Passive captures and field sessions on one installation instead observed the stream stopping after roughly five minutes with the TCP connection retained from the client side (a client-side view; a half-open connection is not excluded) — see `docs/protocol_assumptions.md`, ledger items A2 and A15.
 - The module is reported to enter a refused-connection state if a socket is closed abruptly or reopened too quickly. Graceful socket closure on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion is mandatory.
 
 Incoming messages have the observed shape:
@@ -197,6 +201,16 @@ If a keepalive is ever approved, it remains bound by all of the following constr
 - This is a transport keepalive, not a generic read-only operation. Describe it as such in code and documentation.
 
 The probe defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
+
+### Transport Session Recycle Policy
+
+Passive stale-session recycle is the approved recovery design for the N-BW2 transport adapter (`docs/adr/0002-nbw2-passive-stale-session-recycle.md`): when the adapter's socket is connected but no valid frame has arrived within a bounded read-idle interval, the adapter closes the connection gracefully, reuses its existing reconnect lifecycle, and waits for a new valid frame. It transmits nothing at any point.
+
+Parameter policy: the NBW2 adapter may use a bounded configurable read-idle recycle policy. The selected threshold must exceed normal expected frame spacing and must remain below the freshness threshold during controlled validation. Exact values are field-validation parameters, not protocol facts, and are not recorded in this document, in the ADR, or in the protocol assumptions ledger; any value change requires a separate approved implementation review.
+
+Containment: the recycle is NBW2-adapter-specific and lives in the NBW2 client only. The coordinator and entities remain unaware of it. A future SmartLinq hardware source uses explicit documented heartbeat and data-freshness metadata instead of inheriting NBW2 session quirks. Passive recycle remains the fallback recovery path even if a separately approved outbound session-maintenance experiment later succeeds.
+
+This policy is distinct from the Transport Keepalive Policy: it grants no outbound bytes, no keepalive, and no other transmission, and ledger item A11 remains Unknown. Recycling is not validated, not established as safe indefinitely, and not established as suitable for all modules (ledger item A16); a connected TCP socket never proves a healthy N-BW2 session. The design is documentation-only at this commit: no implementation exists, and implementation requires separate explicit approval.
 
 ### Commands
 
