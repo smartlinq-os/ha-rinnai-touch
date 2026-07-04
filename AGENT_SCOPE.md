@@ -51,7 +51,7 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
 7. Prefer clear diagnostics and graceful failure over aggressive retry behaviour.
 8. Close the TCP socket gracefully on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion. The module is reported to mishandle abrupt closes and rapid reconnects.
 9. The module reboot command `CS<DVPW>{wpa-key}<BOOT>\r` is known from the upstream reference but forbidden. Do not implement, expose, or recommend it. Any future consideration requires separate credential handling, an explicit safety review, and a dedicated design decision.
-10. The only write permitted in Phase 1 is the transport keepalive defined in the Transport Keepalive Policy, and only after passive probe validation confirms the module's idle disconnect behaviour.
+10. The only write that could ever be permitted in Phase 1 is the transport keepalive defined in the Transport Keepalive Policy. No keepalive form is currently approved; the policy's gate conditions apply in full.
 
 ## Core Principles
 
@@ -66,6 +66,17 @@ Maintain Apache-2.0 attribution in `NOTICE` and project documentation.
 - Safe command serialisation
 - HACS-ready project structure
 - Testable protocol layer independent from Home Assistant entities
+
+## Architecture References
+
+- `docs/adr/0001-transport-source-boundary.md` — the transport/source
+  boundary and the transport-neutral SmartLinq semantic contract. The N-BW2
+  TCP client is a supported legacy transport adapter beneath that boundary,
+  not the SmartLinq HVAC product core.
+- `docs/networker_evidence.md` — the Rinnai / Brivis Networker bus evidence
+  register (Proven / Inference / Hypothesis / Unknown). Networker bus facts
+  must not enter integration code, entities, or configuration without
+  separately approved scope.
 
 ## Home Assistant and HomeKit Boundary
 
@@ -162,17 +173,23 @@ The parser must correctly handle:
 
 ### Transport Keepalive Policy
 
-The upstream reference reports the module disconnects idle TCP clients after about five minutes. To hold a persistent monitored session, a narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
+The upstream reference reports the module disconnects idle TCP clients after about five minutes; this project's passive captures observed a silence condition with the TCP connection retained (see `docs/protocol_assumptions.md`, ledger item A2). External implementations address idle sessions with differing idle-traffic forms and cadences (one sends a bare sequence-number header roughly every 60 seconds; another sends a short non-JSON idle token appended to a sequence header at a much shorter cadence). These are behavioural evidence only.
 
-- The keepalive frame is exactly `N` followed by a six-digit sequence number, with no JSON payload.
+**No keepalive form is approved.** Ledger item A11 remains Unknown. Enabling any transport keepalive requires all of:
+
+1. review of readable authoritative N-BW2 API documentation;
+2. a separately approved controlled experiment;
+3. explicit user approval of the resulting design.
+
+If a keepalive is ever approved, it remains bound by all of the following constraints:
+
+- The candidate frame previously scoped for this project is exactly `N` followed by a six-digit sequence number, with no JSON payload.
 - The sequence is derived from the latest valid received frame.
 - Keepalives are sent no more frequently than every 60 seconds.
 - No keepalive is sent until at least one valid status frame has been received on the current connection.
 - The keepalive must never include a JSON payload, and must never be a reboot, date/time, mode, power, fan, zone, pump, schedule, or any other state-changing command.
 - Keepalives are logged at debug level only.
 - This is a transport keepalive, not a generic read-only operation. Describe it as such in code and documentation.
-
-The keepalive becomes Phase 1 integration behaviour only after passive probe validation confirms the module's idle disconnect behaviour.
 
 The probe defaults to passive mode and must not send any bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
 
@@ -346,7 +363,7 @@ Build this first.
 Phase 1 has two operating modes:
 
 - Passive observation mode: no bytes are transmitted.
-- Persistent monitored mode: only after passive validation, the narrowly authorised transport keepalive may be transmitted to maintain a stable local session.
+- Persistent monitored mode: a possible future mode in which a narrowly scoped transport keepalive maintains a stable local session — only if the Transport Keepalive Policy's gate conditions are ever met. No keepalive form is currently approved.
 
 No HVAC state-changing command is permitted in either mode. The keepalive is a tightly scoped transport write, not a generic read-only operation.
 
@@ -366,7 +383,7 @@ Required features:
 - Zone availability/install indicators
 - Diagnostics download with sensitive data redacted
 - Unit tests using anonymised protocol fixtures
-- Transport keepalive per the Transport Keepalive Policy, enabled only after passive probe validation
+- Transport keepalive per the Transport Keepalive Policy, only if its gate conditions are ever met (currently parked; no form approved)
 - Conservative, cumulative capability and zone discovery
 - Config-flow and documentation warnings about the upstream-reported single-local-client limitation
 

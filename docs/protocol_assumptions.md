@@ -12,6 +12,8 @@ Protocol facts below are derived from reading the upstream Homebridge project:
 
 No live-device captures exist yet. Every fact below, however well supported by upstream source, remains subject to confirmation by passive probe observation.
 
+Where an entry cites "external implementations", the behavioural evidence comes from read-only review (4 July 2026) of the upstream Homebridge reference above plus `funtastix/rinnaitouch` and `funtastix/pyrinnaitouch` (v0.13.4b1). No code is copied from any of them; their behaviour is evidence only.
+
 ## Upstream-Sourced Protocol Facts
 
 ### UDP discovery
@@ -30,7 +32,8 @@ No live-device captures exist yet. Every fact below, however well supported by u
 - Upstream reports the module drops connections after roughly five minutes without receiving any bytes.
 - Upstream reports the module can enter a refused-connection state if a socket is closed abruptly or reopened too quickly. Graceful closure is mandatory on Home Assistant stop, integration unload, config-entry reload, and config-flow validation completion.
 - Upstream reports the module normally reboots itself daily, that a permanently held TCP connection prevents this, and that the module may become unstable after being connected for long periods.
-- Sources: `src/rinnai/TcpService.ts`, `src/rinnai/RinnaiSession.ts`, `docs/troubleshooting.md`.
+- External implementations expect the module to send the short ASCII greeting `*HELLO*` immediately after TCP connect, before any status frame: one consumes it explicitly, the other discards it as pre-frame bytes. This is external behavioural evidence only — not a locally confirmed protocol guarantee until this project observes a successful field session. This project's parser already treats any pre-frame bytes as ordinary discardable input, and the transport forensics record the greeting's presence as a boolean (ledger item A14).
+- Sources: `src/rinnai/TcpService.ts`, `src/rinnai/RinnaiSession.ts`, `docs/troubleshooting.md`; `*HELLO*` behaviour: external implementations (see Provenance).
 
 ### Framing
 
@@ -110,15 +113,19 @@ Zone and value caveats:
 Phase 1 has two operating modes:
 
 - Passive observation mode: no bytes are transmitted.
-- Persistent monitored mode: only after passive validation, the narrowly authorised transport keepalive may be transmitted to maintain a stable local session.
+- Persistent monitored mode: a possible future mode in which a narrowly scoped transport keepalive maintains a stable local session — only if the Transport Keepalive Policy's gate conditions are ever met. No keepalive form is currently approved.
 
 No HVAC state-changing command is permitted in either mode. The keepalive is a tightly scoped transport write, not a generic read-only operation.
 
 ## Transport Keepalive Policy
 
-The upstream reference reports the module disconnects idle TCP clients after about five minutes. A narrowly constrained transport keepalive is authorised for the native integration, subject to all of the following:
+The upstream reference reports the module disconnects idle TCP clients after about five minutes; this project's passive captures observed a silence condition with the TCP connection retained (ledger item A2). External implementations address idle sessions with differing idle-traffic forms and cadences (one sends a bare sequence-number header roughly every 60 seconds; another sends a short non-JSON idle token appended to a sequence header at a much shorter cadence). These are behavioural evidence only.
 
-- The keepalive frame is exactly `N` followed by a six-digit sequence number, with no JSON payload.
+**No keepalive form is approved.** Ledger item A11 remains Unknown. Enabling any transport keepalive requires all of: (1) review of readable authoritative N-BW2 API documentation; (2) a separately approved controlled experiment; (3) explicit user approval of the resulting design.
+
+If a keepalive is ever approved, it remains bound by all of the following constraints:
+
+- The candidate frame previously scoped for this project is exactly `N` followed by a six-digit sequence number, with no JSON payload.
 - The sequence is derived from the latest valid received frame.
 - Keepalives are sent no more frequently than every 60 seconds.
 - No keepalive is sent until at least one valid status frame has been received on the current connection.
@@ -126,7 +133,7 @@ The upstream reference reports the module disconnects idle TCP clients after abo
 - Keepalives are logged at debug level only.
 - It is described as a transport keepalive, not as a generic read-only operation.
 
-The keepalive becomes Phase 1 integration behaviour only after passive probe validation confirms the module's idle disconnect behaviour. The probe defaults to passive mode and sends no bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
+The probe defaults to passive mode and sends no bytes unless explicitly invoked with a keepalive option. The first real-world probe run must be passive for at least six minutes, with Homebridge stopped and no competing local Rinnai client connected.
 
 ## Config Flow Connection Policy
 
@@ -176,9 +183,10 @@ and refuses anything it cannot safely sanitise.
 | A8 | Evaporative semantics incl. comfort-level mapping | upstream flags evap untested | community samples | Unvalidated |
 | A9 | Multi-controller payload shape | upstream flags untested | community samples | Unvalidated |
 | A10 | UDP datagram full layout and broadcast cadence | offset-32 port only documented | passive UDP capture (discovery phase) | Unvalidated |
-| A11 | The blank keepalive is side-effect-free and sufficient to hold the connection | upstream sends it every 60 s | future controlled experiment, separately approved | Unvalidated — experiment motivated by evidence; nothing validated or enabled |
+| A11 | Any idle keepalive form is side-effect-free and sufficient to hold the connection | external implementations send differing idle traffic (form and cadence differ) | readable authoritative N-BW2 API review, then a separately approved controlled experiment | Unknown — no form validated, authorised, or enabled |
 | A12 | `TU` values are only `C`/`F` | upstream default handling | captures; community samples | Unvalidated |
 | A13 | Existence/shape of a `ZUO` group | not observed upstream | captures | Partially validated — `ZUO` observed on the reference system; semantics, shape variation, and cross-firmware behaviour remain unvalidated |
+| A14 | The module sends the `*HELLO*` greeting after TCP connect, before status frames | external implementations (behavioural evidence only) | first successful field session (the transport forensics record banner presence) | Externally observed; locally Unknown |
 
 ## Known Unknowns
 
