@@ -22,7 +22,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -32,6 +32,7 @@ pytest.importorskip(
     reason="ha-test dependency group is not installed",
 )
 
+from conftest import FakeMonotonic, FakeRinnaiClient, FakeWallClock
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -42,7 +43,6 @@ from custom_components.rinnai_touch import coordinator as coordinator_module
 from custom_components.rinnai_touch.client import (
     ConnectionEvent,
     ConnectionState,
-    RinnaiTcpClient,
 )
 from custom_components.rinnai_touch.coordinator import (
     Freshness,
@@ -63,52 +63,8 @@ COORDINATOR_LOGGER = "custom_components.rinnai_touch.coordinator"
 
 # --- fakes and helpers --------------------------------------------------------
 
-
-class FakeMonotonic:
-    """Injected monotonic clock under full test control."""
-
-    def __init__(self, start: float = 1_000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-
-class FakeWallClock:
-    """Injected UTC wall clock, fully independent of the monotonic clock."""
-
-    def __init__(self) -> None:
-        self.now = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += timedelta(seconds=seconds)
-
-
-class FakeRinnaiClient(RinnaiTcpClient):
-    """Client double: records lifecycle calls, never touches a socket.
-
-    Construction of the real client is side-effect-free, so the real
-    constructor is reused; only the lifecycle entry points are replaced.
-    Tests drive the coordinator through its handler methods, exactly as
-    the real client's dispatcher would (synchronous, event-loop context).
-    """
-
-    def __init__(self, host: str, port: int, **kwargs: Any) -> None:
-        super().__init__(host, port, **kwargs)
-        self.start_calls = 0
-        self.stop_calls = 0
-
-    async def start(self) -> None:
-        self.start_calls += 1
-
-    async def stop(self) -> None:
-        self.stop_calls += 1
+# FakeMonotonic, FakeWallClock, and FakeRinnaiClient live in tests/conftest.py
+# and are shared with test_entities.py.
 
 
 def make_snapshot(sequence: int = 1) -> StatusSnapshot:

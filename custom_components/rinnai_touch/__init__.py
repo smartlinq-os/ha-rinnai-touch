@@ -1,9 +1,11 @@
 """Rinnai Touch: local-only, passive Home Assistant integration.
 
-Config-entry lifecycle only at this milestone: setup builds and starts the
-passive push :class:`~.coordinator.RinnaiTouchCoordinator`; unload shuts it
-down. No entity platforms, diagnostics, options flow, or write paths exist
-yet — those follow in later approved milestones.
+Config-entry lifecycle plus the read-only entity layer: setup builds and
+starts the passive push :class:`~.coordinator.RinnaiTouchCoordinator`, then
+forwards the sensor and binary_sensor platforms; unload unloads those
+platforms and shuts the coordinator down. No control platforms, services,
+diagnostics, or options flow exist — those follow in later approved
+milestones, and no write path exists anywhere.
 
 Setup never raises ``ConfigEntryNotReady``: the passive client owns all
 reconnect/backoff behaviour (approved decision D1), so an entry loads even
@@ -17,12 +19,16 @@ repeat, so overlapping paths stay harmless.
 
 from __future__ import annotations
 
+from typing import Final
+
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
 
 from .const import CONF_HOST, CONF_PORT, DEFAULT_TCP_PORT
 from .coordinator import RinnaiTouchCoordinator
+
+PLATFORMS: Final = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 type RinnaiTouchConfigEntry = ConfigEntry[RinnaiTouchCoordinator]
 
@@ -30,7 +36,7 @@ type RinnaiTouchConfigEntry = ConfigEntry[RinnaiTouchCoordinator]
 async def async_setup_entry(
     hass: HomeAssistant, entry: RinnaiTouchConfigEntry
 ) -> bool:
-    """Start the passive coordinator for one module; no platforms yet."""
+    """Start the passive coordinator and the read-only entity platforms."""
     coordinator = RinnaiTouchCoordinator(
         hass,
         host=entry.data[CONF_HOST],
@@ -51,12 +57,20 @@ async def async_setup_entry(
             EVENT_HOMEASSISTANT_STOP, _async_shutdown_on_ha_stop
         )
     )
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(
     hass: HomeAssistant, entry: RinnaiTouchConfigEntry
 ) -> bool:
-    """Shut the coordinator down; runtime data is dropped with the entry."""
-    await entry.runtime_data.async_shutdown()
-    return True
+    """Unload the entity platforms, then shut the coordinator down.
+
+    Runtime data is dropped with the entry. The coordinator is shut down
+    only on a successful platform unload, so a failed unload leaves the
+    entry consistently loaded rather than half-torn-down.
+    """
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        await entry.runtime_data.async_shutdown()
+    return unload_ok

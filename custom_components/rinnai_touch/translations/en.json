@@ -23,5 +23,29 @@
     "abort": {
       "already_configured": "This module address is already configured."
     }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connectivity": {
+        "name": "Connectivity"
+      },
+      "fault_active": {
+        "name": "Fault active"
+      }
+    },
+    "sensor": {
+      "data_freshness": {
+        "name": "Data freshness"
+      },
+      "last_valid_status": {
+        "name": "Last valid status"
+      },
+      "operating_mode": {
+        "name": "Operating mode"
+      },
+      "controller_state": {
+        "name": "Controller state"
+      }
+    }
   }
 }

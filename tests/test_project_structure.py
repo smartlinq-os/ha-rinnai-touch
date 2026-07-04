@@ -114,17 +114,27 @@ def test_hacs_metadata_is_valid(repo_root: Path) -> None:
 
 
 def test_control_modules_do_not_exist_yet(integration_dir: Path) -> None:
-    # AGENT_SCOPE.md: climate.py and switch.py must remain absent until
-    # explicit Phase 2 approval; sensor.py, binary_sensor.py, and
-    # diagnostics.py await their own approved Phase 1 milestones.
+    # AGENT_SCOPE.md: control surfaces (climate, switch, fan, number,
+    # select, button, services) must remain absent until explicit Phase 2
+    # approval; diagnostics.py awaits its own approved Phase 1 milestone.
     for module_name in (
         "climate.py",
         "switch.py",
-        "sensor.py",
-        "binary_sensor.py",
+        "fan.py",
+        "number.py",
+        "select.py",
+        "button.py",
+        "services.yaml",
         "diagnostics.py",
     ):
         assert not (integration_dir / module_name).exists(), module_name
+
+
+def test_read_only_entity_layer_modules_exist(integration_dir: Path) -> None:
+    # The approved Commit 10 read-only entity layer: shared bases plus the
+    # sensor and binary_sensor platforms.
+    for module_name in ("entity.py", "sensor.py", "binary_sensor.py"):
+        assert (integration_dir / module_name).exists(), module_name
 
 
 def test_scaffold_modules_import_nothing_unsafe(integration_dir: Path) -> None:
@@ -174,7 +184,7 @@ def _relative_import_targets(path: Path) -> set[str]:
 
 
 def test_ha_layer_import_boundaries(integration_dir: Path) -> None:
-    """__init__.py, config_flow.py, and coordinator.py are the HA layer.
+    """The HA layer: lifecycle, config flow, coordinator, and entities.
 
     Each may import homeassistant — the pure layers may not — but sockets
     and HTTP stay forbidden, and none of them may reach past the client
@@ -183,7 +193,14 @@ def test_ha_layer_import_boundaries(integration_dir: Path) -> None:
     socket-creating asyncio stream APIs are additionally banned by name
     across the whole HA layer.
     """
-    ha_layer = ("__init__.py", "config_flow.py", "coordinator.py")
+    ha_layer = (
+        "__init__.py",
+        "config_flow.py",
+        "coordinator.py",
+        "entity.py",
+        "sensor.py",
+        "binary_sensor.py",
+    )
     banned_calls = {"open_connection", "create_connection", "start_server"}
     for module_file in ha_layer:
         path = integration_dir / module_file
@@ -218,6 +235,101 @@ def test_no_module_calls_outbound_write_apis(integration_dir: Path) -> None:
         }
         overlap = attribute_calls & banned
         assert not overlap, f"{module_file.name} calls banned APIs: {overlap}"
+
+
+ENTITY_LAYER_MODULES = ("entity.py", "sensor.py", "binary_sensor.py")
+
+
+def test_entity_modules_touch_client_enum_only(integration_dir: Path) -> None:
+    """Entity modules may import only ConnectionState from the client layer.
+
+    Entities read everything through the coordinator. The single permitted
+    exception is the pure ``ConnectionState`` enum (the connectivity
+    binary sensor compares against it); constructing or managing a client
+    from an entity module is forbidden.
+    """
+    for module_file in ENTITY_LAYER_MODULES:
+        tree = ast.parse((integration_dir / module_file).read_text("utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level >= 1
+                and (node.module or "").split(".")[0] == "client"
+            ):
+                names = {alias.name for alias in node.names}
+                assert names <= {"ConnectionState"}, (
+                    f"{module_file} imports {names} from the client layer"
+                )
+        referenced = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        }
+        assert "RinnaiTcpClient" not in referenced, module_file
+
+
+def test_no_module_calls_refresh_or_service_apis(integration_dir: Path) -> None:
+    """No module triggers coordinator refreshes or registers services.
+
+    The read-only entity layer must never start refresh machinery, and no
+    Phase 1 module may register a Home Assistant service.
+    ``async_set_updated_data`` is the coordinator's approved push
+    publication mechanism (coordinator.py module docstring) and is
+    permitted there alone; every other listed API is banned everywhere.
+    """
+    banned = {
+        "async_request_refresh",
+        "async_refresh",
+        "async_config_entry_first_refresh",
+        "async_set_updated_data",
+        "async_register",
+        "async_register_entity_service",
+    }
+    for module_file in sorted(integration_dir.glob("*.py")):
+        allowed = (
+            {"async_set_updated_data"}
+            if module_file.name == "coordinator.py"
+            else set[str]()
+        )
+        tree = ast.parse(module_file.read_text(encoding="utf-8"))
+        calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        overlap = calls & (banned - allowed)
+        assert not overlap, f"{module_file.name} calls banned APIs: {overlap}"
+
+
+def test_strings_and_translations_are_identical(integration_dir: Path) -> None:
+    """strings.json and translations/en.json carry the same content.
+
+    Home Assistant reads a custom integration's runtime texts from
+    translations/en.json while strings.json remains the source document;
+    the two must never drift apart.
+    """
+    strings = json.loads((integration_dir / "strings.json").read_text("utf-8"))
+    translations = json.loads(
+        (integration_dir / "translations" / "en.json").read_text("utf-8")
+    )
+    assert strings == translations
+
+
+def test_entity_translations_cover_the_approved_inventory(
+    integration_dir: Path,
+) -> None:
+    """Every approved entity key has a name translation, and nothing more."""
+    strings = json.loads((integration_dir / "strings.json").read_text("utf-8"))
+    entity_section = strings["entity"]
+    assert set(entity_section) == {"binary_sensor", "sensor"}
+    assert set(entity_section["binary_sensor"]) == {
+        "connectivity",
+        "fault_active",
+    }
+    assert set(entity_section["sensor"]) == {
+        "data_freshness",
+        "last_valid_status",
+        "operating_mode",
+        "controller_state",
+    }
 
 
 def test_coordinator_defines_no_command_or_keepalive_api(
@@ -272,11 +384,12 @@ def test_loopback_socket_opt_in_is_narrow_and_loopback_only(
 ) -> None:
     """The pytest-socket loopback opt-in stays exactly as narrow as approved.
 
-    Exactly the four modules that run in-process loopback servers opt in
-    to ``loopback_socket_enabled`` (defined in tests/conftest.py), and
+    Exactly the approved modules that run in-process loopback servers opt
+    in to ``loopback_socket_enabled`` (defined in tests/conftest.py), and
     the intentional networking in those modules uses only the literal
     IPv4 loopback host — no other address literal may appear in an
-    opted-in module.
+    opted-in module. tests/test_entities.py must never join this list:
+    the entity layer is proven passive by running fully socket-blocked.
     """
     tests_dir = repo_root / "tests"
     opted_in = {

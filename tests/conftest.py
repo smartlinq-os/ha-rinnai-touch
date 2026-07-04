@@ -5,11 +5,13 @@ Assistant instance, and no connection to any Rinnai or Brivis hardware.
 
 This conftest makes the repository root importable so that
 ``custom_components.rinnai_touch`` resolves as a namespace package during
-tests, and hosts the shared loopback-socket opt-in fixture and the minimal
-:class:`LoopbackServer` helper for the modules that run in-process
-127.0.0.1 servers. There is deliberately no ``tests/__init__.py``: pytest
-discovers these tests by path, and keeping ``tests`` out of the import
-namespace avoids shadowing anything.
+tests, and hosts the shared offline test doubles: the fake clocks and the
+socket-free fake client (used by test_coordinator.py and test_entities.py),
+the loopback-socket opt-in fixture, and the minimal :class:`LoopbackServer`
+helper for the modules that run in-process 127.0.0.1 servers. There is
+deliberately no ``tests/__init__.py``: pytest discovers these tests by
+path, and keeping ``tests`` out of the import namespace avoids shadowing
+anything.
 """
 
 from __future__ import annotations
@@ -19,7 +21,9 @@ import importlib.util
 import sys
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +31,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# custom_components resolves only after the sys.path insert above, so this
+# import cannot sit in the top import block. The client layer is pure
+# Python (no Home Assistant), so importing it never needs the ha-test group.
+from custom_components.rinnai_touch.client import RinnaiTcpClient  # noqa: E402
 
 
 @pytest.fixture
@@ -58,6 +67,53 @@ def loopback_socket_enabled(request: pytest.FixtureRequest) -> None:
     """
     if importlib.util.find_spec("pytest_socket") is not None:
         request.getfixturevalue("socket_enabled")
+
+
+class FakeMonotonic:
+    """Injected monotonic clock under full test control."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeWallClock:
+    """Injected UTC wall clock, fully independent of the monotonic clock."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+class FakeRinnaiClient(RinnaiTcpClient):
+    """Client double: records lifecycle calls, never touches a socket.
+
+    Construction of the real client is side-effect-free, so the real
+    constructor is reused; only the lifecycle entry points are replaced.
+    Tests drive the coordinator through its handler methods, exactly as
+    the real client's dispatcher would (synchronous, event-loop context).
+    """
+
+    def __init__(self, host: str, port: int, **kwargs: Any) -> None:
+        super().__init__(host, port, **kwargs)
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    async def start(self) -> None:
+        self.start_calls += 1
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
 
 
 class LoopbackServer:
