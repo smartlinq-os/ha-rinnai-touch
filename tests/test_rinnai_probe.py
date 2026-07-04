@@ -22,6 +22,9 @@ import pytest
 
 from scripts import rinnai_probe as probe
 
+# In-process 127.0.0.1 servers only; opt-in fixture defined in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("loopback_socket_enabled")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROBE_PATH = REPO_ROOT / "scripts" / "rinnai_probe.py"
 

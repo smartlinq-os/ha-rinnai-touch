@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import re
 import socket
 import sys
 from pathlib import Path
@@ -128,6 +129,153 @@ def test_scaffold_modules_import_nothing_unsafe(integration_dir: Path) -> None:
         imported = _top_level_imports(integration_dir / module_file)
         overlap = imported & {"socket", "homeassistant", "aiohttp"}
         assert not overlap, f"{module_file} imports forbidden modules: {overlap}"
+
+
+def test_pure_layers_never_import_home_assistant(integration_dir: Path) -> None:
+    """The four pure protocol-layer modules never import Home Assistant.
+
+    protocol.py, models.py, client.py, and const.py must stay importable
+    and testable without Home Assistant installed; coordinator.py is the
+    single HA-aware module (see test_coordinator_import_boundaries). The
+    scan walks the entire AST, so an import buried in a function body or
+    a TYPE_CHECKING block is caught just the same, and dotted forms such
+    as ``import homeassistant.util`` or ``from homeassistant.util import
+    dt`` all reduce to the banned first segment.
+    """
+    for module_file in ("protocol.py", "models.py", "client.py", "const.py"):
+        imported = _top_level_imports(integration_dir / module_file)
+        assert "homeassistant" not in imported, (
+            f"{module_file} must never import homeassistant"
+        )
+
+
+def _relative_import_targets(path: Path) -> set[str]:
+    """Return the first segments of relative (``from .x import``) imports."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level >= 1:
+            if node.module:
+                targets.add(node.module.split(".")[0])
+            else:
+                targets |= {alias.name.split(".")[0] for alias in node.names}
+    return targets
+
+
+def test_coordinator_import_boundaries(integration_dir: Path) -> None:
+    """coordinator.py is the only Home Assistant-aware module.
+
+    It adapts client callbacks for Home Assistant, so importing
+    homeassistant is expected — but sockets and HTTP stay forbidden, and
+    it must never reach past the client boundary into the frame parser:
+    protocol knowledge stays in the pure layers, which in turn must stay
+    importable without Home Assistant installed (enforced for them by
+    test_scaffold_modules_import_nothing_unsafe).
+    """
+    path = integration_dir / "coordinator.py"
+    imported = _top_level_imports(path)
+    assert "homeassistant" in imported, "coordinator.py is the HA layer"
+    assert not imported & {"socket", "aiohttp"}
+    assert "protocol" not in _relative_import_targets(path)
+
+
+def test_no_module_calls_outbound_write_apis(integration_dir: Path) -> None:
+    """No integration module may call a socket/stream write-style API.
+
+    Phase 1 is passive. test_tcp_client locks client.py specifically; this
+    repo-wide sweep extends the same lock to every integration module,
+    including coordinator.py and anything added in later milestones.
+    """
+    banned = {"write", "writelines", "drain", "send", "sendall", "sendto"}
+    for module_file in sorted(integration_dir.glob("*.py")):
+        tree = ast.parse(module_file.read_text(encoding="utf-8"))
+        attribute_calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        overlap = attribute_calls & banned
+        assert not overlap, f"{module_file.name} calls banned APIs: {overlap}"
+
+
+def test_coordinator_defines_no_command_or_keepalive_api(
+    integration_dir: Path,
+) -> None:
+    banned = ("command", "send", "write", "keepalive", "hvac", "setpoint")
+    source = (integration_dir / "coordinator.py").read_text(encoding="utf-8")
+    names = [
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+    for name in names:
+        lowered = name.lower()
+        assert not any(word in lowered for word in banned), name
+
+
+LOOPBACK_OPT_IN_MODULES = frozenset(
+    {
+        "test_capture_fixtures.py",
+        "test_coordinator.py",
+        "test_rinnai_probe.py",
+        "test_tcp_client.py",
+    }
+)
+
+
+def _module_usefixtures(path: Path) -> set[str]:
+    """Fixture names referenced by a module-level ``pytestmark`` assignment."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "pytestmark" not in targets:
+            continue
+        for call in ast.walk(node.value):
+            if isinstance(call, ast.Call):
+                names |= {
+                    arg.value
+                    for arg in call.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                }
+    return names
+
+
+def test_loopback_socket_opt_in_is_narrow_and_loopback_only(
+    repo_root: Path,
+) -> None:
+    """The pytest-socket loopback opt-in stays exactly as narrow as approved.
+
+    Exactly the four modules that run in-process loopback servers opt in
+    to ``loopback_socket_enabled`` (defined in tests/conftest.py), and
+    the intentional networking in those modules uses only the literal
+    IPv4 loopback host — no other address literal may appear in an
+    opted-in module.
+    """
+    tests_dir = repo_root / "tests"
+    opted_in = {
+        path.name
+        for path in tests_dir.glob("test_*.py")
+        if "loopback_socket_enabled" in _module_usefixtures(path)
+    }
+    assert opted_in == LOOPBACK_OPT_IN_MODULES
+    ipv4_pattern = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+    for module_name in sorted(LOOPBACK_OPT_IN_MODULES):
+        tree = ast.parse((tests_dir / module_name).read_text(encoding="utf-8"))
+        string_values = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        assert "127.0.0.1" in string_values, module_name
+        addresses = {
+            match
+            for value in string_values
+            for match in ipv4_pattern.findall(value)
+        }
+        assert addresses <= {"127.0.0.1"}, f"{module_name}: {addresses}"
 
 
 def test_package_import_creates_no_sockets(monkeypatch) -> None:

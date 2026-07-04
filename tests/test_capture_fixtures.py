@@ -19,9 +19,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from custom_components.rinnai_touch.client import ConnectionState, RinnaiTcpClient
 from custom_components.rinnai_touch.models import RinnaiStatusModel
 from custom_components.rinnai_touch.protocol import ParsedFrame, RinnaiFrameParser
+
+# In-process 127.0.0.1 servers only; opt-in fixture defined in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("loopback_socket_enabled")
 
 TESTS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
