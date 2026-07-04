@@ -1,0 +1,27 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Rinnai Touch module",
+        "description": "Enter the address of the Rinnai/Brivis WiFi module. The module accepts only one local TCP client at a time: stop Homebridge or any other local client using it before connecting. Validation makes a single passive connection and only reads status data.",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "IP address or hostname of the WiFi module.",
+          "port": "TCP port of the module's local status service."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the module.",
+      "no_status_received": "Connected, but no valid Rinnai status data arrived. Check that this is the module address and that no other local client (for example Homebridge) is connected.",
+      "invalid_host": "Enter a host name or IP address.",
+      "unknown": "Unexpected error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "This module address is already configured."
+    }
+  }
+}

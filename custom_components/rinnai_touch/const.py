@@ -32,6 +32,12 @@ COMMAND_ACK_TIMEOUT_SECONDS: Final = 15
 STALE_STATUS_THRESHOLD_SECONDS: Final = 180
 RECONNECT_BACKOFF_SCHEDULE_SECONDS: Final = (2, 5, 10, 30, 60)
 
+# Config-flow validation deadline: the single deliberate passive validation
+# connection must yield at least one valid status frame within this bound.
+# It contains CONNECT_TIMEOUT_SECONDS plus several seconds of the observed
+# roughly-one-frame-per-second stream.
+CONFIG_VALIDATION_TIMEOUT_SECONDS: Final = 15
+
 # Minimum spacing of the Phase 1 transport keepalive (AGENT_SCOPE.md,
 # "Transport Keepalive Policy"). The keepalive itself is not implemented in
 # this milestone.

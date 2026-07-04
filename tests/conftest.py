@@ -5,16 +5,20 @@ Assistant instance, and no connection to any Rinnai or Brivis hardware.
 
 This conftest makes the repository root importable so that
 ``custom_components.rinnai_touch`` resolves as a namespace package during
-tests, and hosts the shared loopback-socket opt-in fixture for the four
-modules that run in-process 127.0.0.1 servers. There is deliberately no
-``tests/__init__.py``: pytest discovers these tests by path, and keeping
-``tests`` out of the import namespace avoids shadowing anything.
+tests, and hosts the shared loopback-socket opt-in fixture and the minimal
+:class:`LoopbackServer` helper for the modules that run in-process
+127.0.0.1 servers. There is deliberately no ``tests/__init__.py``: pytest
+discovers these tests by path, and keeping ``tests`` out of the import
+namespace avoids shadowing anything.
 """
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -54,3 +58,94 @@ def loopback_socket_enabled(request: pytest.FixtureRequest) -> None:
     """
     if importlib.util.find_spec("pytest_socket") is not None:
         request.getfixturevalue("socket_enabled")
+
+
+class LoopbackServer:
+    """Minimal in-process 127.0.0.1 TCP server for loopback-only tests.
+
+    Deliberately dumb — no protocol parser, no command API, no fake-device
+    state model. It binds only the literal IPv4 loopback address, counts
+    accepted connections, records every inbound byte (so passive behaviour
+    can be asserted), can push raw bytes to the most recent connection
+    like a module's unsolicited status stream, and closes deterministically.
+    """
+
+    def __init__(self) -> None:
+        self._server: asyncio.Server | None = None
+        self._writers: list[asyncio.StreamWriter] = []
+        self._accepted = asyncio.Event()
+        self.connection_count = 0
+        self.open_connections = 0
+        self.received = bytearray()
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None
+        return int(self._server.sockets[0].getsockname()[1])
+
+    async def _handle(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.connection_count += 1
+        self.open_connections += 1
+        self._writers.append(writer)
+        self._accepted.set()
+        try:
+            while chunk := await reader.read(1024):
+                self.received.extend(chunk)
+        except OSError:
+            pass
+        finally:
+            self.open_connections -= 1
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
+    async def wait_for_connection(
+        self, count: int = 1, timeout: float = 5.0
+    ) -> None:
+        async with asyncio.timeout(timeout):
+            while self.connection_count < count:
+                self._accepted.clear()
+                await self._accepted.wait()
+
+    async def send(self, data: bytes) -> None:
+        """Push raw bytes to the most recent connection, unsolicited."""
+        assert self._writers, "no connection accepted yet"
+        writer = self._writers[-1]
+        writer.write(data)
+        await writer.drain()
+
+    async def drop_current(self) -> None:
+        """Deterministically close the most recent connection."""
+        assert self._writers, "no connection accepted yet"
+        writer = self._writers[-1]
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+    async def wait_all_closed(self, timeout: float = 5.0) -> None:
+        async with asyncio.timeout(timeout):
+            while self.open_connections:
+                await asyncio.sleep(0.001)
+
+    async def stop(self) -> None:
+        """Close every connection and the listener; safe to call twice."""
+        for writer in self._writers:
+            writer.close()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+
+@pytest.fixture
+async def loopback_server() -> AsyncIterator[LoopbackServer]:
+    """One started LoopbackServer on an ephemeral 127.0.0.1 port."""
+    server = LoopbackServer()
+    await server.start()
+    yield server
+    await server.stop()

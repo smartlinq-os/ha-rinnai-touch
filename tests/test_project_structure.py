@@ -1,8 +1,10 @@
 """Offline structural tests for the project scaffold.
 
 These tests assert safe project-level facts only: constants, metadata
-validity, phase boundaries, and side-effect-free imports. They must run with
-no network access and must not import Home Assistant.
+validity, phase boundaries, and side-effect-free imports. They must run
+with no network access and without Home Assistant, except the single
+package-import check, which is explicitly gated because ``__init__.py``
+now hosts the config-entry lifecycle and therefore imports Home Assistant.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import socket
 import sys
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 
 def _fresh_import(module_name: str) -> ModuleType:
@@ -98,9 +102,9 @@ def test_manifest_is_valid_and_matches_scope(integration_dir: Path) -> None:
     assert manifest["iot_class"] == "local_push", "local-only push design; no polling"
     assert manifest["requirements"] == [], "no runtime dependencies at this stage"
     assert manifest["version"], "a provisional version must be declared"
-    # No config flow milestone has been approved yet; the manifest must not
-    # imply one exists.
-    assert "config_flow" not in manifest
+    # The config-flow milestone (Commit 9) is approved: the manifest must
+    # declare it so Home Assistant offers UI setup.
+    assert manifest["config_flow"] is True
     assert "cloud" not in json.dumps(manifest).lower()
 
 
@@ -111,14 +115,21 @@ def test_hacs_metadata_is_valid(repo_root: Path) -> None:
 
 def test_control_modules_do_not_exist_yet(integration_dir: Path) -> None:
     # AGENT_SCOPE.md: climate.py and switch.py must remain absent until
-    # explicit Phase 2 approval.
-    assert not (integration_dir / "climate.py").exists()
-    assert not (integration_dir / "switch.py").exists()
+    # explicit Phase 2 approval; sensor.py, binary_sensor.py, and
+    # diagnostics.py await their own approved Phase 1 milestones.
+    for module_name in (
+        "climate.py",
+        "switch.py",
+        "sensor.py",
+        "binary_sensor.py",
+        "diagnostics.py",
+    ):
+        assert not (integration_dir / module_name).exists(), module_name
 
 
 def test_scaffold_modules_import_nothing_unsafe(integration_dir: Path) -> None:
     forbidden = {"socket", "asyncio", "homeassistant", "aiohttp"}
-    for module_file in ("__init__.py", "const.py", "models.py"):
+    for module_file in ("const.py", "models.py"):
         imported = _top_level_imports(integration_dir / module_file)
         overlap = imported & forbidden
         assert not overlap, f"{module_file} imports forbidden modules: {overlap}"
@@ -162,21 +173,32 @@ def _relative_import_targets(path: Path) -> set[str]:
     return targets
 
 
-def test_coordinator_import_boundaries(integration_dir: Path) -> None:
-    """coordinator.py is the only Home Assistant-aware module.
+def test_ha_layer_import_boundaries(integration_dir: Path) -> None:
+    """__init__.py, config_flow.py, and coordinator.py are the HA layer.
 
-    It adapts client callbacks for Home Assistant, so importing
-    homeassistant is expected — but sockets and HTTP stay forbidden, and
-    it must never reach past the client boundary into the frame parser:
-    protocol knowledge stays in the pure layers, which in turn must stay
-    importable without Home Assistant installed (enforced for them by
-    test_scaffold_modules_import_nothing_unsafe).
+    Each may import homeassistant — the pure layers may not — but sockets
+    and HTTP stay forbidden, and none of them may reach past the client
+    boundary into the frame parser. config_flow.py must reuse the existing
+    passive client rather than opening sockets of its own, so the
+    socket-creating asyncio stream APIs are additionally banned by name
+    across the whole HA layer.
     """
-    path = integration_dir / "coordinator.py"
-    imported = _top_level_imports(path)
-    assert "homeassistant" in imported, "coordinator.py is the HA layer"
-    assert not imported & {"socket", "aiohttp"}
-    assert "protocol" not in _relative_import_targets(path)
+    ha_layer = ("__init__.py", "config_flow.py", "coordinator.py")
+    banned_calls = {"open_connection", "create_connection", "start_server"}
+    for module_file in ha_layer:
+        path = integration_dir / module_file
+        imported = _top_level_imports(path)
+        assert "homeassistant" in imported, f"{module_file} is the HA layer"
+        assert not imported & {"socket", "aiohttp"}, module_file
+        assert "protocol" not in _relative_import_targets(path), module_file
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        overlap = calls & banned_calls
+        assert not overlap, f"{module_file} opens sockets itself: {overlap}"
 
 
 def test_no_module_calls_outbound_write_apis(integration_dir: Path) -> None:
@@ -216,7 +238,9 @@ def test_coordinator_defines_no_command_or_keepalive_api(
 LOOPBACK_OPT_IN_MODULES = frozenset(
     {
         "test_capture_fixtures.py",
+        "test_config_flow.py",
         "test_coordinator.py",
+        "test_init.py",
         "test_rinnai_probe.py",
         "test_tcp_client.py",
     }
@@ -279,6 +303,11 @@ def test_loopback_socket_opt_in_is_narrow_and_loopback_only(
 
 
 def test_package_import_creates_no_sockets(monkeypatch) -> None:
+    # __init__.py imports Home Assistant for the config-entry lifecycle
+    # (approved decision D5), so this import check needs HA present; the
+    # base non-HA environment skips exactly this one test.
+    pytest.importorskip("homeassistant")
+
     def _forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("socket created during package import")
 
