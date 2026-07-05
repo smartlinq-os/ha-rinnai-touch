@@ -60,7 +60,30 @@ Reconnect policy
     connections, or emits only empty frames, still escalates instead of
     being hammered (the upstream reference reports the module dislikes
     rapid reconnects). The sleep function is injectable so tests control
-    time completely.
+    time completely. After a read-idle recycle the chosen delay is
+    additionally floored at ``recycle_reconnect_delay`` seconds (see
+    Read-idle recycle).
+
+Read-idle recycle
+    A bounded transport-level recovery (ADR 0002): when the socket is
+    connected but the parser -> model path has not produced an accepted
+    :class:`StatusSnapshot` for ``read_idle_timeout`` seconds (default
+    ``const.READ_IDLE_RECYCLE_THRESHOLD_SECONDS``; ``None`` disables the
+    bound entirely), the client ends the session with the fixed forensic
+    reason ``idle-timeout`` and lets the normal supervisor lifecycle
+    close the writer gracefully and reconnect. Nothing is transmitted.
+    Every accepted snapshot — including one from a valid empty ``N…[]``
+    frame — re-anchors the deadline; greeting bytes, partial fragments,
+    and malformed candidates never do. The backoff-reset rule above is
+    untouched: valid empty frames still do not reset backoff, so an
+    idle-recycled session without a non-empty frame keeps escalating.
+    The reconnect delay after a recycle is floored at
+    ``recycle_reconnect_delay`` seconds (default
+    ``const.RECYCLE_RECONNECT_DELAY_SECONDS``). A recycle publishes the
+    CONNECTION_FAILED -> RECONNECTING transition without error text:
+    ``last_error`` and the coordinator's historical error record are
+    untouched. The private flag driving that floor is behavioural state,
+    deliberately separate from the logging-only forensic session reason.
 
 Callbacks
     Snapshot and connection-event callbacks may be sync or async. They are
@@ -102,7 +125,9 @@ from typing import ClassVar, Final
 from .const import (
     CONNECT_TIMEOUT_SECONDS,
     DEFAULT_TCP_PORT,
+    READ_IDLE_RECYCLE_THRESHOLD_SECONDS,
     RECONNECT_BACKOFF_SCHEDULE_SECONDS,
+    RECYCLE_RECONNECT_DELAY_SECONDS,
 )
 from .models import RinnaiStatusModel, StatusSnapshot
 from .protocol import RinnaiFrameParser
@@ -127,7 +152,8 @@ class ConnectionEvent:
     """One connection-state transition, published to the state callback.
 
     ``error`` carries a short description when the transition was caused
-    by a failure (refused connection, reset, unexpected EOF), else None.
+    by a failure (refused connection, reset, unexpected EOF), else None
+    (a deliberate idle recycle publishes no error text).
     """
 
     state: ConnectionState
@@ -268,22 +294,35 @@ class RinnaiTcpClient:
         on_connection_event: ConnectionEventCallback | None = None,
         reconnect_delays: Sequence[float] = RECONNECT_BACKOFF_SCHEDULE_SECONDS,
         connect_timeout: float = CONNECT_TIMEOUT_SECONDS,
+        read_idle_timeout: float | None = READ_IDLE_RECYCLE_THRESHOLD_SECONDS,
+        recycle_reconnect_delay: float = RECYCLE_RECONNECT_DELAY_SECONDS,
         sleep: SleepFunction = asyncio.sleep,
         monotonic: MonotonicFunction = time.monotonic,
     ) -> None:
         if not reconnect_delays:
             raise ValueError("reconnect_delays must contain at least one delay")
+        if read_idle_timeout is not None and read_idle_timeout <= 0:
+            raise ValueError("read_idle_timeout must be positive or None")
+        if recycle_reconnect_delay < 0:
+            raise ValueError("recycle_reconnect_delay must not be negative")
         self._host = host
         self._port = port
         self._on_snapshot = on_snapshot
         self._on_connection_event = on_connection_event
         self._delays: tuple[float, ...] = tuple(reconnect_delays)
         self._connect_timeout = connect_timeout
+        self._read_idle_timeout = read_idle_timeout
+        self._recycle_reconnect_delay = recycle_reconnect_delay
         self._sleep = sleep
         self._monotonic = monotonic
         self._model = RinnaiStatusModel()
         self._state = ConnectionState.STOPPED
         self._stopping = False
+        # Read-idle recycle behaviour state (ADR 0002): the flag drives the
+        # supervisor's post-recycle delay floor and is deliberately separate
+        # from the logging-only forensic session reason.
+        self._idle_recycled = False
+        self._idle_recycle_count = 0
         self._run_task: asyncio.Task[None] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._frames_received = 0
@@ -419,6 +458,7 @@ class RinnaiTcpClient:
         try:
             delay_index = 0
             while not self._stopping:
+                self._idle_recycled = False
                 session = self._begin_session(delay_index)
                 error: str
                 try:
@@ -461,12 +501,29 @@ class RinnaiTcpClient:
                     self._finish_session("stopped")
                 if self._stopping:
                     break
-                self._last_error = error
-                await self._set_state(ConnectionState.CONNECTION_FAILED, error)
+                if self._idle_recycled:
+                    # Deliberate transport recovery (ADR 0002), not a
+                    # connection error: publish the transition without error
+                    # text so ``last_error`` and the coordinator's historical
+                    # error record stay untouched.
+                    await self._set_state(ConnectionState.CONNECTION_FAILED)
+                else:
+                    self._last_error = error
+                    await self._set_state(ConnectionState.CONNECTION_FAILED, error)
                 await self._set_state(ConnectionState.RECONNECTING)
                 step_index = min(delay_index, len(self._delays) - 1)
                 delay = self._delays[step_index]
                 delay_index += 1
+                if self._idle_recycled and delay < self._recycle_reconnect_delay:
+                    # Post-recycle delay floor: max(backoff delay, floor).
+                    _LOGGER.debug(
+                        "client #%d: post-recycle delay floor raises"
+                        " %.0f s to %.0f s",
+                        self._client_number,
+                        delay,
+                        self._recycle_reconnect_delay,
+                    )
+                    delay = self._recycle_reconnect_delay
                 _LOGGER.debug(
                     "client #%d: retrying in %.0f s (backoff step %d/%d)",
                     self._client_number,
@@ -497,12 +554,35 @@ class RinnaiTcpClient:
         like a transport failure instead of silently killing the task.
         The ``session`` tracker collects forensic counters and timings as
         a pure observer: parser input and outcomes are untouched.
+
+        Read-idle recycle (ADR 0002): with a configured ``read_idle_timeout``
+        every read is bounded by the time remaining until one threshold
+        after the last accepted snapshot (or after session start while no
+        snapshot has been accepted yet). Only an accepted snapshot — the
+        product of the parser -> model path, valid empty frames included —
+        re-anchors the deadline; discarded or malformed bytes never do. On
+        expiry the session ends with the fixed reason ``idle-timeout`` and
+        the supervisor's normal lifecycle reconnects. External cancellation
+        passes through the bounded wait unconverted, so ``stop()`` behaves
+        exactly as before.
         """
         parser = RinnaiFrameParser()  # fresh framing state per connection
         session.parser = parser
+        idle_timeout = self._read_idle_timeout
+        idle_anchor = self._monotonic()
         try:
             while not self._stopping:
-                chunk = await reader.read(_READ_CHUNK_BYTES)
+                if idle_timeout is None:
+                    chunk = await reader.read(_READ_CHUNK_BYTES)
+                else:
+                    remaining = idle_anchor + idle_timeout - self._monotonic()
+                    if remaining <= 0:
+                        return self._mark_idle_recycle(session, idle_timeout)
+                    try:
+                        async with asyncio.timeout(remaining):
+                            chunk = await reader.read(_READ_CHUNK_BYTES)
+                    except TimeoutError:
+                        return self._mark_idle_recycle(session, idle_timeout)
                 if not chunk:
                     session.reason = "remote-eof"
                     return "connection closed by remote end"
@@ -528,6 +608,10 @@ class RinnaiTcpClient:
                                 ),
                             )
                     snapshot = self._model.apply(frame)
+                    # Accepted snapshot: the only event that re-anchors the
+                    # read-idle deadline (valid empty frames included;
+                    # rejected bytes never reach this point).
+                    idle_anchor = self._monotonic()
                     self._last_snapshot = snapshot
                     await self._dispatch_snapshot(snapshot)
             session.reason = "stopped"
@@ -540,6 +624,34 @@ class RinnaiTcpClient:
             session.error_class = error_class
             session.error_errno = error_errno
             return f"read failed: {err}"
+
+    def _mark_idle_recycle(
+        self, session: _OpenSession, idle_timeout: float
+    ) -> str:
+        """Mark the session for a passive stale-session recycle (ADR 0002).
+
+        Sets the private behaviour flag consumed by the supervisor's
+        post-recycle delay floor — deliberately separate from the forensic
+        session ``reason``, which stays logging-only — and returns the
+        supervisor's session-end description, which is deliberately neither
+        stored in ``last_error`` nor published in the CONNECTION_FAILED
+        event: a recycle is a deliberate recovery, not a connection error.
+        """
+        self._idle_recycled = True
+        self._idle_recycle_count += 1
+        session.reason = "idle-timeout"
+        _LOGGER.debug(
+            "client #%d session #%d: no accepted snapshot within the"
+            " read-idle threshold (%.0f s); recycling session (frames=%d,"
+            " non_empty=%d, idle recycles=%d)",
+            self._client_number,
+            session.number,
+            idle_timeout,
+            session.frames,
+            session.non_empty_frames,
+            self._idle_recycle_count,
+        )
+        return "no valid frame within the read-idle threshold; session recycled"
 
     async def _close_writer(self) -> None:
         """Close the connection gracefully; never raises."""
@@ -622,11 +734,23 @@ class RinnaiTcpClient:
             )
 
     def _note_first_valid_frame(self, session: _OpenSession) -> None:
-        """Log session health and clear the outage escalation state."""
+        """Log session health and clear the outage escalation state.
+
+        The client's first-ever valid frame and a frame that ends an
+        outage stay at INFO; the routine first frame of a later session —
+        every post-recycle reconnect, at steady state — logs at DEBUG so
+        normal recycling stays quiet (ADR 0002).
+        """
         first_frame_at = session.first_frame_at
         if first_frame_at is None:  # caller sets it just before calling
             return
-        _LOGGER.info(
+        level = (
+            logging.INFO
+            if self._frames_received == 1 or self._sessions_without_frame
+            else logging.DEBUG
+        )
+        _LOGGER.log(
+            level,
             "client #%d session #%d: first valid frame received (+%d ms)",
             self._client_number,
             session.number,

@@ -66,6 +66,10 @@ def test_timing_constants_match_approved_values() -> None:
     assert const.STALE_STATUS_THRESHOLD_SECONDS == 180
     assert const.RECONNECT_BACKOFF_SCHEDULE_SECONDS == (2, 5, 10, 30, 60)
     assert const.KEEPALIVE_MIN_SPACING_SECONDS == 60
+    # Passive stale-session recycle (ADR 0002): provisional field-validation
+    # parameters approved at Gate A of Commit 14B — not protocol facts.
+    assert const.READ_IDLE_RECYCLE_THRESHOLD_SECONDS == 150
+    assert const.RECYCLE_RECONNECT_DELAY_SECONDS == 10
 
 
 def test_timing_constants_are_internally_consistent() -> None:
@@ -78,6 +82,27 @@ def test_timing_constants_are_internally_consistent() -> None:
     # keepalives, and connecting must resolve well before staleness.
     assert const.KEEPALIVE_MIN_SPACING_SECONDS < const.STALE_STATUS_THRESHOLD_SECONDS
     assert const.CONNECT_TIMEOUT_SECONDS < const.STALE_STATUS_THRESHOLD_SECONDS
+    # Passive stale-session recycle (ADR 0002). The difference between the
+    # freshness threshold and (recycle threshold + recycle delay) is a
+    # target budget for normal reconnect and first-valid-frame latency,
+    # not a no-stale guarantee: a brief truthful STALE state remains
+    # possible when reconnect or first-frame latency exceeds the budget.
+    assert (
+        0
+        < const.READ_IDLE_RECYCLE_THRESHOLD_SECONDS
+        < const.STALE_STATUS_THRESHOLD_SECONDS
+    )
+    # RECYCLE_RECONNECT_DELAY_SECONDS >= the first backoff step: the floor
+    # must never reconnect faster than the normal first retry.
+    assert (
+        const.RECONNECT_BACKOFF_SCHEDULE_SECONDS[0]
+        <= const.RECYCLE_RECONNECT_DELAY_SECONDS
+    )
+    assert (
+        const.READ_IDLE_RECYCLE_THRESHOLD_SECONDS
+        + const.RECYCLE_RECONNECT_DELAY_SECONDS
+        < const.STALE_STATUS_THRESHOLD_SECONDS
+    )
 
 
 def test_sequence_constants_are_consistent() -> None:

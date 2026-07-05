@@ -1220,3 +1220,413 @@ async def test_stop_mid_session_summary_without_warning(
     assert summary.frames_received == 0
     assert client._sessions_without_frame == 0  # stop is not an outage
     assert client_warnings(caplog) == []
+
+
+# --- read-idle recycle: passive stale-session recovery (Commit 14B / ADR 0002) ---
+
+
+def new_recycle_client(
+    port: int,
+    *,
+    read_idle_timeout: float | None,
+    recycle_reconnect_delay: float = 10.0,
+    snapshots: SnapshotCollector | None = None,
+    events: EventCollector | None = None,
+    sleeper: FakeSleep | None = None,
+) -> RinnaiTcpClient:
+    """Client with an explicit read-idle bound; loopback only, like new_client."""
+    return RinnaiTcpClient(
+        "127.0.0.1",
+        port,
+        on_snapshot=snapshots,
+        on_connection_event=events,
+        sleep=sleeper if sleeper is not None else FakeSleep(),
+        read_idle_timeout=read_idle_timeout,
+        recycle_reconnect_delay=recycle_reconnect_delay,
+    )
+
+
+async def test_idle_silence_after_frames_triggers_recycle_and_recovery(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    events = EventCollector()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.15,
+        snapshots=snapshots,
+        events=events,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        # Silence: no further bytes. The bounded read expires, the client
+        # recycles through the normal reconnect lifecycle, and a fresh
+        # session delivers status again.
+        await server.wait_for_connections(2)
+        await events.wait_for_state(ConnectionState.CONNECTION_FAILED)
+        assert ConnectionState.RECONNECTING in events.states
+        failed = [
+            event
+            for event in events.events
+            if event.state is ConnectionState.CONNECTION_FAILED
+        ]
+        assert failed and failed[0].error is None  # recovery, not an error
+        assert client.last_error is None  # a recycle never records an error
+        await server.send(encode_frame(2, [SYST_FULL, HGOM_GROUP]))
+        await snapshots.wait_for(2)  # recovered on the new session
+    finally:
+        await client.stop()
+
+
+async def test_recycle_sends_no_bytes(server: FakeRinnaiServer) -> None:
+    snapshots = SnapshotCollector()
+    client = new_recycle_client(
+        server.port, read_idle_timeout=0.05, snapshots=snapshots
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await server.wait_for_connections(2)  # a full recycle happened
+        assert bytes(server.received) == b""  # recycle is passive
+    finally:
+        await client.stop()
+    assert bytes(server.received) == b""
+
+
+async def test_recycle_closes_gracefully_before_reconnect(
+    server: FakeRinnaiServer,
+) -> None:
+    async def settle_sleep(_delay: float) -> None:
+        await asyncio.sleep(0.1)  # room to observe the closed socket
+
+    snapshots = SnapshotCollector()
+    client = RinnaiTcpClient(
+        "127.0.0.1",
+        server.port,
+        on_snapshot=snapshots,
+        sleep=settle_sleep,
+        read_idle_timeout=0.05,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        # The recycle reuses the graceful writer-close path: the server
+        # observes a clean EOF and its handler exits before the delayed
+        # reconnect begins a second connection.
+        await wait_until(lambda: server.open_connections == 0)
+        assert server.connection_count == 1  # reconnect not yet begun
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "established-then-closed"
+        assert summary.reason == "idle-timeout"
+        assert summary.error_class is None
+        assert summary.error_errno is None
+        await server.wait_for_connections(2)
+        assert server.max_open_connections == 1  # never two sockets at once
+    finally:
+        await client.stop()
+
+
+async def test_recycle_applies_post_recycle_delay_floor(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    sleeper = FakeSleep()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.05,
+        recycle_reconnect_delay=10.0,
+        snapshots=snapshots,
+        sleeper=sleeper,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await sleeper.wait_for_delays(1)
+        # The non-empty session reset backoff to the 2 s head; the
+        # post-recycle floor raises the effective delay to 10 s.
+        assert sleeper.delays == [10.0]
+    finally:
+        await client.stop()
+
+
+async def test_non_empty_session_backoff_reset_retained_through_recycle(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    sleeper = FakeSleep()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.05,
+        recycle_reconnect_delay=2.0,  # floor == schedule head: reset visible
+        snapshots=snapshots,
+        sleeper=sleeper,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.drop_current()  # frameless session: escalate to step 2
+        await server.wait_for_connections(2)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        # Silence -> idle recycle. The non-empty frame reset the backoff,
+        # so the schedule restarted at 2 s; without the reset the second
+        # recorded delay would have been the escalated 5 s step.
+        await sleeper.wait_for_delays(2)
+        assert sleeper.delays == [2, 2]
+    finally:
+        await client.stop()
+
+
+async def test_session_without_non_empty_frame_retains_backoff_escalation(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    sleeper = FakeSleep()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.03,
+        recycle_reconnect_delay=0.0,  # no floor: raw schedule stays visible
+        sleeper=sleeper,
+    )
+    try:
+        await client.start()
+        # The server accepts but never sends: every session recycles from
+        # the connect-time anchor and the existing escalation is retained.
+        await sleeper.wait_for_delays(4)
+        assert sleeper.delays == [2, 5, 10, 30]
+        warnings = client_warnings(caplog)
+        assert len(warnings) == 1  # one outage warning, unchanged wording
+        assert "transport session ended without a valid frame" in warnings[0]
+        assert "reason=idle-timeout" in warnings[0]
+        assert client.last_error is None  # recycles record no error text
+    finally:
+        await client.stop()
+
+
+async def test_empty_frame_resets_idle_deadline_without_backoff_reset(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    sleeper = FakeSleep()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.15,
+        recycle_reconnect_delay=0.0,  # no floor: raw schedule stays visible
+        snapshots=snapshots,
+        sleeper=sleeper,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.drop_current()  # frameless session: escalate
+        await server.wait_for_connections(2)
+        # Valid empty frames, spaced inside the threshold but spanning
+        # well beyond one threshold-from-connect window: each accepted
+        # empty snapshot must re-anchor the read-idle deadline, or the
+        # session would have recycled mid-stream.
+        for sequence in range(1, 7):
+            await server.send(encode_frame(sequence, []))
+            await snapshots.wait_for(sequence)
+            await asyncio.sleep(0.05)
+        assert server.connection_count == 2  # still the same session
+        # Silence -> recycle. The empty frames must NOT have reset the
+        # backoff (current policy retained), so the escalated 5 s step
+        # follows the initial 2 s one.
+        await sleeper.wait_for_delays(2)
+        assert sleeper.delays == [2, 5]
+    finally:
+        await client.stop()
+
+
+async def test_only_accepted_snapshots_reset_idle_deadline(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    events = EventCollector()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.15,
+        recycle_reconnect_delay=0.0,
+        snapshots=snapshots,
+        events=events,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        # Bytes keep arriving — banner then unparseable material — but
+        # none produces an accepted snapshot, so the deadline never moves
+        # and the recycle fires regardless. The loop is bounded and ends
+        # as soon as the recycle's reconnect is observed.
+        await server.send(BANNER)
+        with suppress(OSError):
+            for _ in range(20):
+                if server.connection_count >= 2:
+                    break
+                await server.send(b"garbage!!")
+                await asyncio.sleep(0.05)
+        await server.wait_for_connections(2)
+        assert ConnectionState.CONNECTION_FAILED in events.states
+        # Companion: accepted snapshots at the same spacing hold the
+        # session open across the same span.
+        for sequence in range(1, 7):
+            await server.send(encode_frame(sequence, [SYST_PARTIAL]))
+            await snapshots.wait_for(sequence)
+            await asyncio.sleep(0.05)
+        assert server.connection_count == 2  # the stream kept it alive
+    finally:
+        await client.stop()
+
+
+async def test_stop_during_idle_wait_is_clean(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_recycle_client(
+        server.port, read_idle_timeout=5.0, snapshots=snapshots
+    )
+    await client.start()
+    await server.wait_for_connections(1)
+    await server.send(encode_frame(1, [SYST_FULL]))
+    await snapshots.wait_for(1)
+    await client.stop()  # cancels the bounded idle wait mid-flight
+    assert client.state is ConnectionState.STOPPED
+    await wait_until(lambda: server.open_connections == 0)
+    assert server.connection_count == 1  # no reconnect after stop
+    summary = forensics_of(client)
+    assert summary is not None
+    assert summary.phase == "stopped"
+    assert client_warnings(caplog) == []
+
+
+async def test_read_idle_timeout_none_preserves_unbounded_wait(
+    server: FakeRinnaiServer,
+) -> None:
+    events = EventCollector()
+    client = new_recycle_client(
+        server.port, read_idle_timeout=None, events=events
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await asyncio.sleep(0.2)  # far beyond the thresholds used above
+        assert client.state is ConnectionState.CONNECTED
+        assert server.connection_count == 1
+        assert ConnectionState.CONNECTION_FAILED not in events.states
+    finally:
+        await client.stop()
+
+
+async def test_recycle_forensics_reason_label(
+    server: FakeRinnaiServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=CLIENT_LOGGER)
+    snapshots = SnapshotCollector()
+    client = new_recycle_client(
+        server.port, read_idle_timeout=0.2, snapshots=snapshots
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(BANNER)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.phase == "established-then-closed"
+        assert summary.reason == "idle-timeout"
+        assert summary.error_class is None
+        assert summary.error_errno is None
+        assert summary.frames_received == 1
+        assert summary.non_empty_frames == 1
+        assert summary.banner_seen is True
+        messages = client_messages(caplog)
+        assert any("recycling session" in message for message in messages)
+        session_end_lines = [
+            message
+            for message in messages
+            if "session #1: session end (" in message
+        ]
+        assert len(session_end_lines) == 1  # exactly one summary per session
+        assert "reason=idle-timeout" in session_end_lines[0]
+    finally:
+        await client.stop()
+
+
+async def test_eof_during_idle_wait_uses_existing_path(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    sleeper = FakeSleep()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=5.0,
+        recycle_reconnect_delay=10.0,
+        snapshots=snapshots,
+        sleeper=sleeper,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        await server.drop_current()  # EOF long before the 5 s threshold
+        await server.wait_for_connections(2)
+        await wait_for_session_count(client, 1)
+        summary = forensics_of(client)
+        assert summary is not None
+        assert summary.reason == "remote-eof"  # existing path, not a recycle
+        assert sleeper.delays == [2]  # raw schedule head: no recycle floor
+        assert client.last_error == "connection closed by remote end"
+    finally:
+        await client.stop()
+
+
+async def test_idle_recycle_preserves_historical_error_semantics(
+    server: FakeRinnaiServer,
+) -> None:
+    snapshots = SnapshotCollector()
+    events = EventCollector()
+    client = new_recycle_client(
+        server.port,
+        read_idle_timeout=0.15,
+        snapshots=snapshots,
+        events=events,
+    )
+    try:
+        await client.start()
+        await server.wait_for_connections(1)
+        await server.drop_current()  # genuine failure: remote EOF
+        await events.wait_for_state(ConnectionState.CONNECTION_FAILED)
+        assert client.last_error == "connection closed by remote end"
+
+        await server.wait_for_connections(2)
+        await server.send(encode_frame(1, [SYST_FULL]))
+        await snapshots.wait_for(1)
+        # Silence -> idle recycle: a deliberate recovery must neither
+        # overwrite nor clear the historical real-error record.
+        await server.wait_for_connections(3)
+        assert client.last_error == "connection closed by remote end"
+        failed_errors = [
+            event.error
+            for event in events.events
+            if event.state is ConnectionState.CONNECTION_FAILED
+        ]
+        assert failed_errors[0] == "connection closed by remote end"
+        assert failed_errors[1] is None  # the recycle published no text
+        summary = forensics_of(client)
+        assert summary is not None and summary.reason == "idle-timeout"
+    finally:
+        await client.stop()

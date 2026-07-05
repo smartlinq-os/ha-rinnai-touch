@@ -32,6 +32,18 @@ COMMAND_ACK_TIMEOUT_SECONDS: Final = 15
 STALE_STATUS_THRESHOLD_SECONDS: Final = 180
 RECONNECT_BACKOFF_SCHEDULE_SECONDS: Final = (2, 5, 10, 30, 60)
 
+# Passive stale-session recycle (AGENT_SCOPE.md, "Transport Session Recycle
+# Policy"; docs/adr/0002-nbw2-passive-stale-session-recycle.md). Provisional
+# field-validation parameters, not protocol facts: the read-idle threshold
+# must exceed normal expected frame spacing and stay below
+# STALE_STATUS_THRESHOLD_SECONDS, and the reconnect delay floors the backoff
+# delay after a recycle. The margin left under the freshness threshold is a
+# target budget for normal reconnect and first-valid-frame latency, not a
+# no-stale guarantee. Any value change requires a separate approved
+# implementation review.
+READ_IDLE_RECYCLE_THRESHOLD_SECONDS: Final = 150
+RECYCLE_RECONNECT_DELAY_SECONDS: Final = 10
+
 # Config-flow validation deadline: the single deliberate passive validation
 # connection must yield at least one valid status frame within this bound.
 # It contains CONNECT_TIMEOUT_SECONDS plus several seconds of the observed
