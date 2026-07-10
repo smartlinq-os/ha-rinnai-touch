@@ -167,6 +167,8 @@ This integration is independently implemented in Python using Home Assistant arc
 
 See `AGENT_SCOPE.md` for the development architecture, safety constraints and planned milestones.
 
+For the release process, see [`docs/support/release_checklist.md`](docs/support/release_checklist.md).
+
 ### Local development environment
 
 The project is offline-only at this milestone: it contains no networking code, and the test suite runs without network access, hardware, or a Home Assistant instance.
