@@ -202,6 +202,40 @@ This evidence motivates the passive stale-session recycle design
 (`docs/adr/0002-nbw2-passive-stale-session-recycle.md`). It validates no
 keepalive payload and grants no outbound traffic of any kind.
 
+### Gate D Soak Evidence (10 July 2026)
+
+A single-installation automated soak of the Commit 14B passive stale-session
+recycle ran for approximately five days (5–10 July 2026) on the same local
+N-BW2 installation described above, with Homebridge disabled throughout and
+debug logging enabled. Findings, recorded under the same sanitisation
+discipline:
+
+- Of approximately 972 sessions reviewed, approximately 932 were normal
+  idle-timeout recycles, each following the same repeating pattern already
+  described above: roughly five minutes of active streaming, roughly 150
+  seconds of read-idle silence, a graceful recycle, the 10-second
+  post-recycle delay floor, and a new session with the greeting and valid
+  frames resumed.
+- The first-attempt recovery rate after an idle-timeout recycle was
+  approximately 99.7% (928 of 931 evaluable recycles). Typical recovery
+  from recycle trigger to the next valid frame was on the order of 11
+  seconds; the longest observed was on the order of 31 seconds.
+- Zero refused-listener sessions and zero frameless idle-timeout sessions
+  occurred across the observation window.
+- One freshness-stale event occurred, when a single recovery exceeded the
+  remaining margin under the 180-second freshness threshold; the freshness
+  model reported it correctly and recovery followed automatically.
+- A minority of sessions ended for reasons other than idle-timeout:
+  clustered reset events, a small number of connect timeouts, and a single
+  host-unreachable event. Automatic recovery followed every one of them, no
+  refused-listener state resulted, and no progressive degradation trend was
+  identified across the window.
+- Passive stale-session recycle passed Gate D on this one local installation
+  over this observation window (see A15 and A16). This soak validates the
+  passive socket-recycle mechanism only: it exercises no outbound
+  keepalive, acknowledgement, polling request, command, or other
+  session-maintenance traffic, and does not change ledger item A11.
+
 ## Assumptions Requiring Real-World Validation
 
 | ID | Assumption | Basis | Validation method | Status |
@@ -220,8 +254,8 @@ keepalive payload and grants no outbound traffic of any kind.
 | A12 | `TU` values are only `C`/`F` | upstream default handling | captures; community samples | Unvalidated |
 | A13 | Existence/shape of a `ZUO` group | not observed upstream | captures | Partially validated — `ZUO` observed on the reference system; semantics, shape variation, and cross-firmware behaviour remain unvalidated |
 | A14 | The module sends the `*HELLO*` greeting after TCP connect, before status frames | external implementation behavioural evidence plus successful local field sessions | additional sessions and cross-module observation; duplicate-banner or reset semantics remain unvalidated | Partially validated — observed on one local N-BW2 installation after TCP connection and before the first accepted status frame. Cross-module behaviour, firmware variation, and duplicate-banner semantics remain unvalidated |
-| A15 | Closing and reopening the TCP connection after stream silence restores streaming | field sessions — one installation, manual human-paced recycles | bounded user-run field soak after a separately approved implementation | Partially validated — two manual field recycles on one module; automated cadence and cross-module behaviour unvalidated |
-| A16 | The module tolerates a sustained periodic reconnect cadence without entering a refused state | none; community reports (unverified) associate rapid reconnect loops with refused/unavailable listeners | bounded user-run field soak with a kill switch | Unknown |
+| A15 | Closing and reopening the TCP connection after stream silence restores streaming | field sessions — one installation, manual human-paced recycles plus automated Gate D soak | additional field soaks on other modules and firmware; cross-network observation | Partially validated — two manual field recycles plus approximately 932 automated idle-timeout recycles over approximately five days on one local N-BW2 module. First-attempt recovery after idle recycle was approximately 99.7%, with zero refused sessions and zero frameless idle-timeout sessions. Cross-module, cross-firmware, cross-network, and long-term behaviour remain unvalidated. |
+| A16 | The module tolerates a sustained periodic reconnect cadence without entering a refused state | field sessions — one installation, automated Gate D soak; community reports remain unverified | additional field soaks on other modules; long-term listener-wear observation | Partially validated — one local N-BW2 module tolerated approximately 932 automated idle-timeout recycles over approximately five days without entering a refused-listener state. Long-term listener wear, other firmware versions, other networks, seasonal/system-mode variation, and multi-client behaviour remain unvalidated. |
 
 ## Known Unknowns
 
