@@ -1,0 +1,174 @@
+name: Field validation report
+description: Report sanitised, controlled field-validation evidence for the passive stale-session recycle behaviour (see Gate D methodology).
+title: "[Field Validation]: "
+labels: ["field-validation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to report controlled, sanitised evidence from watching the integration over an observation window — for example a multi-day soak similar to this project's own Gate D validation.
+
+        Before submitting, please read the [log collection guide](https://github.com/smartlinq-os/ha-rinnai-touch/blob/main/docs/support/log_collection.md).
+
+        **Report only sanitised lifecycle logs.** Do not include raw protocol frames or payloads, IP addresses, ports, credentials, tokens, or household details.
+
+        Evidence from one module does not prove universal N-BW2 compatibility. Outbound traffic or keepalive behaviour of any kind remains unvalidated unless it was part of a separately approved experiment — please say so explicitly if it was.
+
+  - type: input
+    id: observation_window
+    attributes:
+      label: Observation window duration
+      placeholder: e.g. approximately 48 hours
+    validations:
+      required: true
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: module_type
+    attributes:
+      label: Module type / firmware, if known
+      placeholder: e.g. N-BW2, firmware unknown
+    validations:
+      required: false
+
+  - type: dropdown
+    id: homebridge_disabled
+    attributes:
+      label: Was Homebridge or another local TCP client disabled for the whole observation window?
+      options:
+        - "Yes"
+        - "No"
+        - Unsure
+    validations:
+      required: true
+
+  - type: input
+    id: recycle_count
+    attributes:
+      label: Approximate idle-timeout recycle count
+      placeholder: e.g. approximately 900
+    validations:
+      required: false
+
+  - type: input
+    id: refused_count
+    attributes:
+      label: Refused sessions count
+      placeholder: e.g. 0
+    validations:
+      required: false
+
+  - type: input
+    id: frameless_count
+    attributes:
+      label: Frameless sessions count
+      placeholder: e.g. 0
+    validations:
+      required: false
+
+  - type: input
+    id: stale_count
+    attributes:
+      label: Stale events count
+      placeholder: e.g. 1
+    validations:
+      required: false
+
+  - type: input
+    id: other_events_count
+    attributes:
+      label: Reset / remote-EOF / timeout / host-unreachable events count
+      placeholder: e.g. 40 total, mostly reset
+    validations:
+      required: false
+
+  - type: input
+    id: longest_recovery
+    attributes:
+      label: Longest recovery latency, if known
+      placeholder: e.g. approximately 30 seconds
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frames_resumed
+    attributes:
+      label: Did valid frames resume after recycle?
+      options:
+        - Always
+        - Usually
+        - Sometimes
+        - Rarely
+        - Never
+    validations:
+      required: true
+
+  - type: dropdown
+    id: anomaly
+    attributes:
+      label: Did any wall-controller, vendor-app, HVAC, fault, or operating-mode anomaly occur?
+      options:
+        - "Yes"
+        - "No"
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: anomaly_detail
+    attributes:
+      label: If yes, describe the anomaly (sanitised)
+    validations:
+      required: false
+
+  - type: textarea
+    id: lifecycle_logs
+    attributes:
+      label: Sanitised representative lifecycle logs only
+      description: A few representative session-lifecycle excerpts, not a full raw dump. No raw frames, payloads, IPs, ports, credentials, or tokens.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: manual_intervention
+    attributes:
+      label: Did any manual intervention occur (disabling the entry, reloading, restarting)?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: conclusion
+    attributes:
+      label: Conclusion
+      options:
+        - Pass
+        - Caution
+        - Fail
+        - Inconclusive
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: evidence_ack
+    attributes:
+      label: Evidence and safety checklist
+      options:
+        - label: I have only included sanitised lifecycle logs — no raw protocol frames or payloads.
+          required: true
+        - label: I have not included IP addresses, ports, credentials, tokens, or household details.
+          required: true
+        - label: I understand this report reflects one module/installation and does not prove universal N-BW2 compatibility.
+          required: true
+        - label: I understand outbound/keepalive traffic remains unvalidated unless separately approved, and I did not send any such traffic without separate approval.
+          required: true

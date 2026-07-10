@@ -1,0 +1,4 @@
+# Issue forms cover the two intended report types (bug report and field
+# validation report); blank issues are disabled to keep reports structured
+# and sanitised by default.
+blank_issues_enabled: false

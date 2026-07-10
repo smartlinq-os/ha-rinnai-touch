@@ -1,0 +1,169 @@
+name: Bug report
+description: Report a problem with the Rinnai Touch integration (passive/read-only).
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue. This integration is **passive and read-only**: it does not send commands, acknowledgements, polling requests, or keepalive/session-maintenance traffic to the module.
+
+        Before submitting, please read the [log collection guide](https://github.com/smartlinq-os/ha-rinnai-touch/blob/main/docs/support/log_collection.md) for how to collect and sanitise logs.
+
+        **Do not paste:**
+        - Raw protocol frame payloads
+        - IP addresses, ports, tokens, credentials, or serial numbers
+
+        **Do not repeatedly reload or re-enable the integration** while it shows a refused-connection state — this can make the state worse or harder to clear.
+
+        **Disable the config entry** if you observe any HVAC, controller, or fault anomaly that might be related to the integration, and describe it below rather than continuing to run it.
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: e.g. 2026.7.0
+    validations:
+      required: true
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - HACS release
+        - HACS main/default branch
+        - Manual custom_components copy
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: homebridge_enabled
+    attributes:
+      label: Was Homebridge or another local TCP client enabled at the same time?
+      options:
+        - "Yes"
+        - "No"
+        - Unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module_type
+    attributes:
+      label: Module type, if known
+      options:
+        - N-BW2
+        - Brivis Touch Wi-Fi
+        - Unknown
+        - Other
+    validations:
+      required: false
+
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: What is the issue?
+      multiple: true
+      options:
+        - No connection
+        - Connection refused
+        - Data stale
+        - Entities unavailable
+        - Repeated reconnects
+        - Unexpected fault/controller state
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: still_passive
+    attributes:
+      label: Are you running the integration unmodified (passive/read-only only)?
+      options:
+        - "Yes, unmodified"
+        - "No, I have modified something"
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: log_excerpt
+    attributes:
+      label: Sanitised log excerpt
+      description: See docs/support/log_collection.md for what to include and what to redact. Do not paste raw frames, IPs, ports, tokens, credentials, or serial numbers.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps_before
+    attributes:
+      label: Steps taken before the issue
+    validations:
+      required: false
+
+  - type: dropdown
+    id: reloaded
+    attributes:
+      label: Did you repeatedly reload or re-enable the integration?
+      options:
+        - "Yes"
+        - "No"
+        - Unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ha_restarted
+    attributes:
+      label: Did you restart Home Assistant?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module_restarted
+    attributes:
+      label: Did you restart the module, router, or network?
+      options:
+        - "Yes"
+        - "No"
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: sanitisation_ack
+    attributes:
+      label: Sanitisation and safety checklist
+      options:
+        - label: I have not included raw frame payloads, IP addresses, ports, tokens, credentials, or serial numbers.
+          required: true
+        - label: I have disabled the config entry (rather than left it running or reloaded it repeatedly) if I observed an HVAC, controller, or fault anomaly.
+          required: true

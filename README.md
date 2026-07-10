@@ -146,6 +146,8 @@ logger:
 
 This is noisier: Home Assistant logs a coordinator update for every valid status frame received — roughly once per second while the module is streaming — so full debug logging can produce a large volume of lines across a normal five-minute stream window. Use it only when you need that level of detail, and turn it back down afterwards.
 
+For a fuller guide to collecting and sanitising logs before opening an issue, plus the issue templates themselves, see [`docs/support/log_collection.md`](docs/support/log_collection.md).
+
 ### Module connection constraints
 
 - The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Upstream documentation reports that the TouchApp may still operate via the Rinnai cloud while a local connection is held.
