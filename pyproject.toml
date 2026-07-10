@@ -5,8 +5,8 @@
 
 [project]
 name = "ha-rinnai-touch"
-version = "0.0.1"
-description = "Local-only Home Assistant custom integration for Rinnai Touch and Brivis Touch WiFi HVAC modules (offline scaffold)"
+version = "0.1.0"
+description = "Passive read-only Home Assistant integration for Rinnai Touch / N-BW2 status monitoring"
 license = "Apache-2.0"
 readme = "README.md"
 # Home Assistant 2025+ runs on Python 3.13; 3.12 is kept as the floor so the

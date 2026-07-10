@@ -107,6 +107,45 @@ python scripts/rinnai_probe.py --host <MODULE_IP> --confirm-passive-capture
 
 Raw output is written privately under `reference_data/raw/` (git-ignored). Raw captures can contain household data and must never be committed; each capture includes a notes file with the redaction checklist to follow before any sanitised fixture is created. Any future decision about a transport keepalive depends on the evidence these passive captures provide.
 
+### Passive session recycle
+
+This integration is passive and read-only: it never sends a keepalive, command, acknowledgement, polling request, or other session-maintenance byte to the module.
+
+On the one local N-BW2 installation validated so far, the module streamed status normally for roughly five minutes and then stopped sending frames while the TCP connection stayed open from the integration's point of view. Rather than wait indefinitely on a silent connection, the integration closes and reopens the socket after a period of read-idle silence and lets its normal reconnect logic bring the stream back — still without transmitting anything.
+
+During normal operation this means you may see a brief connectivity drop of around 10–12 seconds approximately every 7–8 minutes. Data freshness should stay "fresh" through this cycle: a multi-day field validation run on one installation showed the stream recovering on the first reconnect attempt in almost every cycle. Full evidence and its limits are recorded in `docs/protocol_assumptions.md` (ledger items A2, A15, A16) — this behaviour is validated on one installation only, and is not a guarantee for every module or firmware.
+
+If data freshness becomes persistently stale, connections start being refused, or sessions repeatedly end without any status frame, disable the integration's config entry and collect logs rather than leaving it running or repeatedly reloading it.
+
+Do not repeatedly reload or re-enable the integration while the module is in a refused-connection state. The module is reported to dislike rapid reconnects, and repeated reloads can make a refused state worse or harder to clear.
+
+This behaviour was validated with Homebridge and any other local TCP client disabled. Local multi-client behaviour is unvalidated — keep competing local clients disabled while testing.
+
+### Logging
+
+For normal troubleshooting, enable debug logging for the transport client and info logging for the coordinator:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.rinnai_touch.client: debug
+    custom_components.rinnai_touch.coordinator: info
+```
+
+This shows session lifecycle, recycle, and reconnect activity without flooding the log.
+
+For deep field debugging, enable debug logging for the whole integration:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.rinnai_touch: debug
+```
+
+This is noisier: Home Assistant logs a coordinator update for every valid status frame received — roughly once per second while the module is streaming — so full debug logging can produce a large volume of lines across a normal five-minute stream window. Use it only when you need that level of detail, and turn it back down afterwards.
+
 ### Module connection constraints
 
 - The module may permit only one active local TCP client at a time. Concurrent use by Homebridge, a probe tool, another integration, or the TouchApp's local connection may cause connection conflicts. Behaviour may vary by module firmware and remains subject to local validation. Upstream documentation reports that the TouchApp may still operate via the Rinnai cloud while a local connection is held.
